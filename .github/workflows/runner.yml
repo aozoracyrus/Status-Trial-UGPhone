@@ -1,0 +1,66 @@
+name: 6h Relay Runner
+
+on:
+  workflow_dispatch:
+  # Chạy dự phòng mỗi 6 tiếng (nếu chuỗi relay bị đứt)
+  schedule:
+    - cron: '0 */6 * * *'
+
+jobs:
+  run-relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip' # Cache để khởi động nhanh hơn
+
+    - name: Install Chrome & Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          google-chrome-stable xvfb libatk1.0-0 libatk-bridge2.0-0 \
+          libcairo2 libcups2 libdbus-1-3 libgdk-pixbuf2.0-0 libgtk-3-0 \
+          libnspr4 libpango-1.0-0 libxss1 fonts-liberation libxdg-basedir1
+
+    - name: Install Python Packages
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Pre-download Camoufox
+      run: python -m camoufox fetch
+
+    - name: Run 345-Minute Loop
+      run: xvfb-run --server-args="-screen 0 1280x1024x24" python long_runner.py
+      env:
+        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        ROLE_PING_ID: ${{ secrets.ROLE_PING_ID }}
+
+    - name: Commit State (Save Message ID)
+      # Bước này chạy NGAY SA KHI python kết thúc (phút 345)
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add data/
+        # Chỉ commit nếu có thay đổi
+        git diff --staged --quiet || git commit -m "Relay: Save state at minute 345"
+        git push
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Trigger Next Runner
+      # Kích hoạt job tiếp theo ngay lập tức
+      run: |
+        curl -L \
+          -X POST \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer ${{ secrets.PAT }}" \
+          https://api.github.com/repos/${{ github.repository }}/actions/workflows/runner.yml/dispatches \
+          -d '{"ref":"main"}' 
