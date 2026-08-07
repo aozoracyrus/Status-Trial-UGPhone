@@ -6,17 +6,15 @@ from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
 
 # =====================================================================
-# CẤU HÌNH THỜI GIAN AN TOÀN
+# CẤU HÌNH
 # =====================================================================
 URL = "https://hanaminikata.com/status_trial_ugphone"
 WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL')
 ROLE_PING_ID = os.environ.get('ROLE_PING_ID')
 
-# CHẠY 345 PHÚT (5 tiếng 45 phút). 
-# Chừa lại 15 phút cho việc cài đặt, commit và trigger job sau.
-# Nếu GitHub ngắt ở phút 350, dữ liệu đã được commit ở phút 345 nên vẫn an toàn.
-DURATION_MINUTES = 345 
-CHECK_INTERVAL = 60    # Check mỗi 1 phút
+DURATION_MINUTES = 345   # Chạy 5h45p rồi bàn giao
+CHECK_INTERVAL = 60      # Scrape đúng nhịp 1 phút
+FOOTER_INTERVAL = 30     # Refresh giờ trên footer mỗi 30 giây
 
 DATA_DIR = "data"
 MSG_ID_FILE = os.path.join(DATA_DIR, "message_id.txt")
@@ -24,7 +22,7 @@ PREV_STATE_FILE = os.path.join(DATA_DIR, "prev_state.json")
 
 REGIONS = {
     'SG': {'name': 'Singapore', 'flag': '🇸🇬'},
-    'HK': {'name': 'Hong Kong', 'flag': '🇭🇰'},
+    'HK': {'name': 'Hong Kong', 'flag': '🇭'},
     'JP': {'name': 'Japan', 'flag': '🇯🇵'},
     'DE': {'name': 'Germany', 'flag': '🇩🇪'},
     'US': {'name': 'America', 'flag': '🇺🇸'}
@@ -34,16 +32,20 @@ REGIONS = {
 # HÀM HỖ TRỢ
 # =====================================================================
 def get_vn_time_str():
-    utc_now = datetime.now(timezone.utc)
-    vn_now = utc_now + timedelta(hours=7)
-    return vn_now.strftime("%H:%M ngày %d/%m/%Y")
+    """Lấy giờ Việt Nam CHUẨN theo múi giờ Asia/Ho_Chi_Minh (khớp time.is)"""
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
+    except Exception:
+        now = datetime.now(timezone.utc) + timedelta(hours=7)
+    return now.strftime("%H:%M ngày %d/%m/%Y")
 
 def ensure_data_dir():
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
 
 # =====================================================================
-# PHẦN CÀO DỮ LIỆU
+# PHẦN CÀO DỮ LIỆU (Giữ nguyên 2 chiến lược đã thành công)
 # =====================================================================
 def scrape():
     # Chiến lược 1: SeleniumBase UC Mode
@@ -54,7 +56,6 @@ def scrape():
         driver.sleep(5)
         html = driver.page_source
         driver.quit()
-        
         if "just a moment" not in html.lower():
             return html
     except Exception as e:
@@ -92,7 +93,7 @@ def parse_html(html):
     return regions
 
 # =====================================================================
-# PHẦN DISCORD (EDIT EMBED + PING)
+# PHẦN DISCORD
 # =====================================================================
 def load_state():
     msg_id = None
@@ -114,13 +115,11 @@ def save_state(msg_id, regions):
     with open(PREV_STATE_FILE, 'w') as f:
         json.dump(regions, f)
 
-def send_discord_embed(regions, msg_id=None):
-    if not WEBHOOK_URL: return None
-
-    vn_time = get_vn_time_str()
-    any_in_stock = any(regions.values())
+def build_embed(regions):
+    """Dựng embed với giờ VIỆT NAM chuẩn, KHÔNG còn chữ Relay Mode"""
+    any_in_stock = any(regions.get(c) for c in REGIONS)
     color = 0x57f287 if any_in_stock else 0xed4245
-    
+
     fields = []
     for code, info in REGIONS.items():
         status = "🟢 Còn máy" if regions.get(code) else "🔴 Hết máy"
@@ -130,30 +129,33 @@ def send_discord_embed(regions, msg_id=None):
             "inline": True
         })
 
-    embed = {
+    return {
         "title": "📱 Trạng thái UGPhone Trial",
         "color": color,
         "fields": fields,
-        "footer": {"text": f"Uptime: {vn_time} • Relay Mode"}
+        "footer": {"text": f"Uptime: {get_vn_time_str()}"}
     }
-    payload = {"embeds": [embed]}
 
-    # 1. Thử EDIT message cũ
+def push_embed(regions, msg_id=None):
+    """Edit message cũ nếu có ID, nếu không thì gửi mới"""
+    if not WEBHOOK_URL: return None
+    payload = {"embeds": [build_embed(regions)]}
+
+    # 1. Thử EDIT
     if msg_id:
         try:
-            url = f"{WEBHOOK_URL}/messages/{msg_id}"
-            res = requests.patch(url, json=payload)
+            res = requests.patch(f"{WEBHOOK_URL}/messages/{msg_id}", json=payload)
             if res.status_code == 200:
                 return msg_id
         except: pass
 
-    # 2. Gửi message MỚI nếu edit thất bại
+    # 2. Gửi MỚI
     try:
         res = requests.post(f"{WEBHOOK_URL}?wait=true", json=payload)
         if res.status_code == 200:
             return res.json().get("id")
     except: pass
-    
+
     return msg_id
 
 def check_and_ping(regions, prev_state):
@@ -169,37 +171,53 @@ def check_and_ping(regions, prev_state):
         except: pass
 
 # =====================================================================
-# MAIN LOOP
+# MAIN LOOP - BỘ LẬP LỊCH CHUẨN 1 PHÚT
 # =====================================================================
 def main():
     print(f"🏁 Bắt đầu chạy relay {DURATION_MINUTES} phút...")
     start_time = time.time()
-    
-    # Load state cũ
+
     msg_id, prev_state = load_state()
     print(f"📂 Message ID hiện tại: {msg_id}")
 
-    while True:
-        elapsed_min = (time.time() - start_time) / 60
-        
-        # Dừng ở phút 345 để kịp commit
-        if elapsed_min >= DURATION_MINUTES:
-            print("⏰ Đã chạy đủ 345 phút. Dừng để bàn giao...")
-            break
+    last_regions = prev_state if prev_state else {c: False for c in REGIONS}
+    check_count = 0
 
-        print(f"🔄 Check lần {int(elapsed_min) + 1}...")
-        
-        html = scrape()
-        if html:
-            regions = parse_html(html)
-            check_and_ping(regions, prev_state)
-            msg_id = send_discord_embed(regions, msg_id)
-            prev_state = regions
-            save_state(msg_id, regions) # Lưu ngay vào file local
-        else:
-            print("❌ Scrape lỗi, đợi 1 phút...")
+    next_scrape = time.time()                    # Scrape ngay lập tức
+    next_footer = time.time() + FOOTER_INTERVAL  # Refresh footer sau 30s
 
-        time.sleep(CHECK_INTERVAL)
+    while (time.time() - start_time) / 60 < DURATION_MINUTES:
+        now = time.time()
+
+        # ---------- 1) SCRAPE ĐÚNG NHÍP 1 PHÚT ----------
+        if now >= next_scrape:
+            check_count += 1
+            html = scrape()
+            if html:
+                regions = parse_html(html)
+                check_and_ping(regions, prev_state)
+                prev_state = regions
+                last_regions = regions
+                msg_id = push_embed(regions, msg_id)
+                save_state(msg_id, regions)
+
+                # Log mới: kèm kết quả từng khu vực
+                ket_qua = ", ".join(f"{c}: {bool(regions.get(c))}" for c in ['SG', 'HK', 'JP', 'DE', 'US'])
+                print(f"🔄 Check lần {check_count} [{get_vn_time_str().split(' ngày')[0]}]: {ket_qua}")
+            else:
+                print(f"🔄 Check lần {check_count}: ❌ Lỗi scrape, thử lại phút sau")
+
+            # Đặt mốc check tiếp theo đúng +60s (không bị trôi nhịp)
+            next_scrape = max(next_scrape + CHECK_INTERVAL, time.time())
+
+        # ---------- 2) REFRESH FOOTER MỖI 30s (không scrape lại) ----------
+        if time.time() >= next_footer:
+            msg_id = push_embed(last_regions, msg_id)
+            next_footer = time.time() + FOOTER_INTERVAL
+
+        time.sleep(3)
+
+    print("⏰ Hết 345 phút. Bàn giao cho runner kế tiếp...")
 
 if __name__ == "__main__":
     main()
