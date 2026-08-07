@@ -2,9 +2,9 @@ name: 6h Relay Runner
 
 on:
   workflow_dispatch:
-  # Chạy dự phòng mỗi 6 tiếng (nếu chuỗi relay bị đứt)
+  # Chạy dự phòng mỗi 12 tiếng (nếu chuỗi relay bị đứt hoặc PAT không kích hoạt)
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 */12 * * *'
 
 jobs:
   run-relay:
