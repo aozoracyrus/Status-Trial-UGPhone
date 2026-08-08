@@ -22,7 +22,7 @@ PREV_STATE_FILE = os.path.join(DATA_DIR, "prev_state.json")
 
 REGIONS = {
     'SG': {'name': 'Singapore', 'flag': '🇸🇬'},
-    'HK': {'name': 'Hong Kong', 'flag': '🇭'},
+    'HK': {'name': 'Hong Kong', 'flag': '🇭🇰'},
     'JP': {'name': 'Japan', 'flag': '🇯🇵'},
     'DE': {'name': 'Germany', 'flag': '🇩🇪'},
     'US': {'name': 'America', 'flag': '🇺🇸'}
