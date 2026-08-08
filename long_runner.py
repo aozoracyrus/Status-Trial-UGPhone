@@ -3,6 +3,7 @@ import json
 import time
 import re
 import requests
+import threading
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
 
@@ -14,8 +15,8 @@ WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL')
 ROLE_PING_ID = os.environ.get('ROLE_PING_ID')
 
 DURATION_MINUTES = 345
-CHECK_INTERVAL = 60      # 1 phút / 1 lần
-FOOTER_INTERVAL = 30     # Footer độc lập, 30s
+CHECK_INTERVAL = 60       # Check status mỗi 1 phút
+PING_AUTO_DELETE = 300    # Xóa tin nhắn ping sau 5 phút (300s)
 
 DATA_DIR = "data"
 MSG_ID_FILE = os.path.join(DATA_DIR, "message_id.txt")
@@ -30,20 +31,27 @@ REGIONS = {
 }
 
 # =====================================================================
-# GIỜ CHUẨN TỪ TIME.IS/VIETNAM (độc lập với vòng check)
+# GIỜ CHUẨN TỪ TIME.IS (format 24h)
 # =====================================================================
 MONTHS = {'January':'01','February':'02','March':'03','April':'04','May':'05','June':'06',
           'July':'07','August':'08','September':'09','October':'10','November':'11','December':'12'}
 
-def get_time_from_timeis():
-    """Lấy giờ trực tiếp từ time.is/Vietnam"""
+def get_time_24h():
+    """Trả về thời gian chuẩn format 24h (13:51, không phải 1:51 PM)"""
+    # Ưu tiên zoneinfo (nhanh, chính xác, offline)
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
+        return now.strftime("%H:%M ngày %d/%m/%Y")
+    except Exception:
+        pass
+    
+    # Fallback: fetch time.is/Vietnam
     try:
         res = requests.get("https://time.is/Vietnam", timeout=5,
                            headers={'User-Agent': 'Mozilla/5.0'})
         t = res.text
-
         hh = mm = None
-        # Cách 1: thẻ <time id="clock"> (kèm am/pm nếu có)
         m = re.search(r'id="clock"[^>]*>(\d{1,2}):(\d{2})', t)
         ampm = re.search(r'id="ampm"[^>]*>(am|pm)', t)
         if m:
@@ -52,51 +60,50 @@ def get_time_from_timeis():
                 if ampm.group(1) == 'pm' and h != 12: h += 12
                 if ampm.group(1) == 'am' and h == 12: h = 0
             hh = h
-        # Cách 2: datetime 24h
-        if hh is None:
-            m2 = re.search(r'id="clock"[^>]*datetime="(\d{1,2}):(\d{2})', t)
-            if m2:
-                hh, mm = int(m2.group(1)), m2.group(2)
-        # Ngày tháng: "Saturday, August 8, 2026"
         d = re.search(r'(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s*(\w+)\s+(\d{1,2}),\s*(\d{4})', t)
-
         if hh is not None and d:
             return f"{str(hh).zfill(2)}:{mm} ngày {str(int(d.group(2))).zfill(2)}/{MONTHS.get(d.group(1), '??')}/{d.group(3)}"
-    except Exception as e:
-        print(f"⚠️ time.is lỗi ({e}), dùng múi giờ hệ thống")
+    except Exception:
+        pass
+    
+    # Fallback cuối cùng
+    now = datetime.now(timezone.utc) + timedelta(hours=7)
+    return now.strftime("%H:%M ngày %d/%m/%Y")
 
-    # Fallback: múi giờ chuẩn IANA (trùng với time.is)
+def get_hhmm():
+    return get_time_24h().split(' ngày')[0]
+
+def seconds_until_next_minute():
+    """Tính số giây cần đợi để đến giây 00 của phút tiếp theo"""
     try:
         from zoneinfo import ZoneInfo
         now = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
     except Exception:
         now = datetime.now(timezone.utc) + timedelta(hours=7)
-    return now.strftime("%H:%M ngày %d/%m/%Y")
-
-def get_hhmm():
-    return get_time_from_timeis().split(' ngày')[0]
+    
+    # Giây 00 của phút tiếp theo
+    next_minute = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    return max(0, (next_minute - now).total_seconds())
 
 def ensure_data_dir():
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
 
 # =====================================================================
-# BROWSER (GIỮ MỞ + WATCHDOG 20s, KHÔNG BAO GIỜ TREO 6 PHÚT)
+# BROWSER (XHR MODE + WATCHDOG 20s)
 # =====================================================================
 class SeleniumBaseBrowser:
     def __init__(self):
         from seleniumbase import Driver
         self.driver = Driver(uc=True, headless=True)
-        self.driver.set_page_load_timeout(20)   # ⏱ Watchdog
-        self.driver.set_script_timeout(20)      # ⏱ Watchdog
+        self.driver.set_page_load_timeout(20)
+        self.driver.set_script_timeout(20)
         self.name = "SeleniumBase UC"
 
     def open_page(self):
         self.driver.uc_open_with_reconnect(URL, reconnect_time=7)
 
     def fetch_fresh_html(self):
-        """XHR đồng bộ trong trang: lấy HTML MỚI từ server trong vài giây,
-        dùng đúng cookie + phiên Cloudflare của browser (giống bấm Làm mới)"""
         js = """
         var x = new XMLHttpRequest();
         x.open('GET', arguments[0] + '?t=' + Date.now(), false);
@@ -106,7 +113,6 @@ class SeleniumBaseBrowser:
         return self.driver.execute_script(js, URL)
 
     def click_refresh(self):
-        """Gọi đúng hàm của nút Làm mới, không chờ load"""
         self.driver.execute_script(
             "if (typeof refreshStatus === 'function') { refreshStatus(); } "
             "else { document.querySelector('button.refresh-btn').click(); }"
@@ -183,7 +189,7 @@ def wait_cloudflare(browser, timeout=90):
     return False
 
 # =====================================================================
-# PARSE + DISCORD
+# PARSE + DISCORD (với auto-delete ping)
 # =====================================================================
 def parse_html(html):
     soup = BeautifulSoup(html, 'html.parser')
@@ -221,6 +227,20 @@ def save_state(msg_id, regions):
     with open(PREV_STATE_FILE, 'w') as f:
         json.dump(regions, f)
 
+def delete_message_after(message_id, delay_seconds):
+    """Lên lịch xóa tin nhắn sau delay (chạy trên thread riêng, không block main)"""
+    def _delete():
+        try:
+            res = requests.delete(f"{WEBHOOK_URL}/messages/{message_id}")
+            if res.status_code == 204:
+                print(f"🗑️ Đã tự động xóa tin nhắn ping sau {delay_seconds}s")
+            else:
+                print(f"⚠️ Xóa ping thất bại: {res.status_code}")
+        except Exception as e:
+            print(f"⚠️ Lỗi xóa ping: {e}")
+    
+    threading.Timer(delay_seconds, _delete).start()
+
 def build_embed(regions):
     any_in_stock = any(regions.get(c) for c in REGIONS)
     color = 0x57f287 if any_in_stock else 0xed4245
@@ -232,7 +252,7 @@ def build_embed(regions):
         "title": "📱 Trạng thái UGPhone Trial",
         "color": color,
         "fields": fields,
-        "footer": {"text": f"Uptime: {get_time_from_timeis()}"}
+        "footer": {"text": f"Uptime: {get_time_24h()}"}
     }
 
 def push_embed(regions, msg_id=None):
@@ -252,18 +272,32 @@ def push_embed(regions, msg_id=None):
     return msg_id
 
 def check_and_ping(regions, prev_state):
+    """Gửi ping nếu có server mới có máy + tự động xóa sau 5 phút"""
     if not ROLE_PING_ID or not WEBHOOK_URL: return
+    
     new_stock = [REGIONS[c]['name'] for c, v in regions.items() if v and not prev_state.get(c, False)]
     if new_stock:
+        msg = f"<@&{ROLE_PING_ID}> 🎉 Server **{', '.join(new_stock)}** vừa có máy!"
         try:
-            requests.post(WEBHOOK_URL, json={"content": f"<@&{ROLE_PING_ID}> 🎉 Server **{', '.join(new_stock)}** vừa có máy!"})
-        except Exception: pass
+            res = requests.post(
+                f"{WEBHOOK_URL}?wait=true",
+                json={"content": msg},
+                headers={"Content-Type": "application/json"}
+            )
+            if res.status_code == 200:
+                ping_msg_id = res.json().get("id")
+                if ping_msg_id:
+                    print(f"🔔 Đã ping role, sẽ tự xóa sau {PING_AUTO_DELETE}s")
+                    # Lên lịch tự động xóa
+                    delete_message_after(ping_msg_id, PING_AUTO_DELETE)
+        except Exception as e:
+            print(f"⚠️ Lỗi gửi ping: {e}")
 
 # =====================================================================
 # MAIN LOOP
 # =====================================================================
 def main():
-    print(f"🏁 Bắt đầu relay {DURATION_MINUTES} phút (XHR mode, watchdog 20s)...")
+    print(f"🏁 Bắt đầu relay {DURATION_MINUTES} phút...")
     start_time = time.time()
 
     msg_id, prev_state = load_state()
@@ -272,13 +306,15 @@ def main():
     last_regions = prev_state if prev_state else {c: False for c in REGIONS}
     check_count = 0
     next_check = time.time()
-    next_footer = time.time() + FOOTER_INTERVAL
+    # 🔑 FIX: cập nhật footer đúng vào giây 00 của phút tiếp theo
+    next_footer = time.time() + seconds_until_next_minute()
 
     browser = start_browser()
     if browser and not wait_cloudflare(browser):
         print("⚠️ Cloudflare chưa qua")
 
     while (time.time() - start_time) / 60 < DURATION_MINUTES:
+        # ---------- CHECK STATUS MỖI 1 PHÚT ----------
         if time.time() >= next_check:
             check_count += 1
             try:
@@ -290,14 +326,11 @@ def main():
                 if browser:
                     html = None
                     via = "XHR"
-
-                    # CÁCH 1: XHR đồng bộ (nhanh vài giây)
                     try:
                         html = browser.fetch_fresh_html()
                     except Exception as e:
                         print(f"⚠️ XHR lỗi: {e}")
 
-                    # CÁCH 2: bấm Làm mới + đọc DOM
                     if not html or 'status-card' not in html:
                         via = "DOM"
                         try:
@@ -307,14 +340,11 @@ def main():
                         except Exception as e:
                             print(f"⚠️ DOM lỗi: {e}")
 
-                    # Nếu dính Cloudflare → xác minh lại
                     if html and "just a moment" in html.lower():
-                        print("⚠️ Cloudflare xuất hiện lại, chờ xác minh...")
+                        print("⚠️ Cloudflare xuất hiện lại...")
                         if wait_cloudflare(browser, 60):
-                            try:
-                                html = browser.fetch_fresh_html()
-                            except Exception:
-                                html = None
+                            try: html = browser.fetch_fresh_html()
+                            except: html = None
                         else:
                             browser.close()
                             browser = None
@@ -342,16 +372,18 @@ def main():
 
             next_check = max(next_check + CHECK_INTERVAL, time.time())
 
-        # FOOTER ĐỘC LẬP 30s (lấy giờ từ time.is)
+        # 🔑 FIX: CẬP NHẬT FOOTER ĐÚNG VÀO GIÂY 00 CỦA MỖI PHÚT
         if time.time() >= next_footer:
             msg_id = push_embed(last_regions, msg_id)
-            next_footer = time.time() + FOOTER_INTERVAL
+            print(f"🕐 Footer cập nhật lúc {get_hhmm()}:00")
+            # Lên lịch cho phút tiếp theo (đúng giây 00)
+            next_footer = time.time() + seconds_until_next_minute()
 
-        time.sleep(2)
+        time.sleep(1)  # sleep ngắn để bắt đúng giây 00
 
     print("⏰ Hết 345 phút. Bàn giao...")
     if browser:
         browser.close()
 
 if __name__ == "__main__":
-    main()
+    main() 
