@@ -1,10 +1,10 @@
 import os
 import json
 import time
+import re
 import requests
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
-import re
 
 # =====================================================================
 # CẤU HÌNH
@@ -14,8 +14,8 @@ WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL')
 ROLE_PING_ID = os.environ.get('ROLE_PING_ID')
 
 DURATION_MINUTES = 345
-CHECK_INTERVAL = 60
-FOOTER_INTERVAL = 30
+CHECK_INTERVAL = 60      # 1 phút / 1 lần
+FOOTER_INTERVAL = 30     # Footer độc lập, 30s
 
 DATA_DIR = "data"
 MSG_ID_FILE = os.path.join(DATA_DIR, "message_id.txt")
@@ -30,32 +30,42 @@ REGIONS = {
 }
 
 # =====================================================================
-# HÀM LẤY GIỜ TỪ TIME.IS/VIETNAM
+# GIỜ CHUẨN TỪ TIME.IS/VIETNAM (độc lập với vòng check)
 # =====================================================================
+MONTHS = {'January':'01','February':'02','March':'03','April':'04','May':'05','June':'06',
+          'July':'07','August':'08','September':'09','October':'10','November':'11','December':'12'}
+
 def get_time_from_timeis():
-    """Fetch giờ chuẩn từ time.is/Vietnam"""
+    """Lấy giờ trực tiếp từ time.is/Vietnam"""
     try:
-        res = requests.get("https://time.is/Vietnam", timeout=5)
-        if res.status_code == 200:
-            # Tìm giờ trong HTML (dạng HH:MM:SS)
-            match = re.search(r'<time[^>]*id="clock"[^>]*>(\d{1,2}:\d{2}:\d{2})</time>', res.text)
-            if match:
-                time_str = match.group(1)  # VD: "11:05:23"
-                # Lấy ngày từ header
-                date_match = re.search(r'<div[^>]*id="dd"[^>]*>(\d{1,2})</div>', res.text)
-                month_match = re.search(r'<div[^>]*id="mm"[^>]*>(\d{1,2})</div>', res.text)
-                year_match = re.search(r'<div[^>]*id="year"[^>]*>(\d{4})</div>', res.text)
-                
-                if date_match and month_match and year_match:
-                    day = date_match.group(1).zfill(2)
-                    month = month_match.group(1).zfill(2)
-                    year = year_match.group(1)
-                    hhmm = time_str[:5]  # "11:05"
-                    return f"{hhmm} ngày {day}/{month}/{year}"
+        res = requests.get("https://time.is/Vietnam", timeout=5,
+                           headers={'User-Agent': 'Mozilla/5.0'})
+        t = res.text
+
+        hh = mm = None
+        # Cách 1: thẻ <time id="clock"> (kèm am/pm nếu có)
+        m = re.search(r'id="clock"[^>]*>(\d{1,2}):(\d{2})', t)
+        ampm = re.search(r'id="ampm"[^>]*>(am|pm)', t)
+        if m:
+            h, mm = int(m.group(1)), m.group(2)
+            if ampm:
+                if ampm.group(1) == 'pm' and h != 12: h += 12
+                if ampm.group(1) == 'am' and h == 12: h = 0
+            hh = h
+        # Cách 2: datetime 24h
+        if hh is None:
+            m2 = re.search(r'id="clock"[^>]*datetime="(\d{1,2}):(\d{2})', t)
+            if m2:
+                hh, mm = int(m2.group(1)), m2.group(2)
+        # Ngày tháng: "Saturday, August 8, 2026"
+        d = re.search(r'(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s*(\w+)\s+(\d{1,2}),\s*(\d{4})', t)
+
+        if hh is not None and d:
+            return f"{str(hh).zfill(2)}:{mm} ngày {str(int(d.group(2))).zfill(2)}/{MONTHS.get(d.group(1), '??')}/{d.group(3)}"
     except Exception as e:
-        print(f"⚠️ Lỗi fetch time.is: {e}")
-    
-    # Fallback về zoneinfo
+        print(f"⚠️ time.is lỗi ({e}), dùng múi giờ hệ thống")
+
+    # Fallback: múi giờ chuẩn IANA (trùng với time.is)
     try:
         from zoneinfo import ZoneInfo
         now = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
@@ -64,66 +74,43 @@ def get_time_from_timeis():
     return now.strftime("%H:%M ngày %d/%m/%Y")
 
 def get_hhmm():
-    """Lấy chỉ HH:MM để log"""
-    full = get_time_from_timeis()
-    return full.split(' ngày')[0]
+    return get_time_from_timeis().split(' ngày')[0]
 
 def ensure_data_dir():
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
 
 # =====================================================================
-# BROWSER CLASSES (GIỮ MỞ SUỐT 345 PHÚT)
+# BROWSER (GIỮ MỞ + WATCHDOG 20s, KHÔNG BAO GIỜ TREO 6 PHÚT)
 # =====================================================================
 class SeleniumBaseBrowser:
     def __init__(self):
         from seleniumbase import Driver
         self.driver = Driver(uc=True, headless=True)
+        self.driver.set_page_load_timeout(20)   # ⏱ Watchdog
+        self.driver.set_script_timeout(20)      # ⏱ Watchdog
         self.name = "SeleniumBase UC"
 
     def open_page(self):
         self.driver.uc_open_with_reconnect(URL, reconnect_time=7)
 
+    def fetch_fresh_html(self):
+        """XHR đồng bộ trong trang: lấy HTML MỚI từ server trong vài giây,
+        dùng đúng cookie + phiên Cloudflare của browser (giống bấm Làm mới)"""
+        js = """
+        var x = new XMLHttpRequest();
+        x.open('GET', arguments[0] + '?t=' + Date.now(), false);
+        x.send();
+        return x.responseText;
+        """
+        return self.driver.execute_script(js, URL)
+
     def click_refresh(self):
-        """Bấm nút Làm mới - thử nhiều cách"""
-        print("🔍 Đang thử click refresh...")
-        
-        # Cách 1: Click bằng selector
-        try:
-            self.driver.click("button.refresh-btn", timeout=3)
-            print("✅ Click bằng selector thành công")
-            return True
-        except Exception as e:
-            print(f"❌ Click selector fail: {e}")
-        
-        # Cách 2: Click bằng text
-        try:
-            self.driver.click_text("Làm mới", timeout=3)
-            print("✅ Click bằng text thành công")
-            return True
-        except Exception as e:
-            print(f"❌ Click text fail: {e}")
-        
-        # Cách 3: Execute JS
-        try:
-            self.driver.execute_script("document.querySelector('button.refresh-btn').click()")
-            print("✅ Click bằng JS thành công")
-            return True
-        except Exception as e:
-            print(f"❌ Click JS fail: {e}")
-        
-        # Cách 4: Gọi function trực tiếp
-        try:
-            self.driver.execute_script("refreshStatus()")
-            print("✅ Gọi refreshStatus() thành công")
-            return True
-        except Exception as e:
-            print(f"❌ Gọi function fail: {e}")
-        
-        # Cách 5: Reload page (fallback cuối cùng)
-        print("⚠️ Tất cả cách click đều fail, reload page...")
-        self.driver.get(URL)
-        return False
+        """Gọi đúng hàm của nút Làm mới, không chờ load"""
+        self.driver.execute_script(
+            "if (typeof refreshStatus === 'function') { refreshStatus(); } "
+            "else { document.querySelector('button.refresh-btn').click(); }"
+        )
 
     def get_html(self):
         return self.driver.page_source
@@ -144,40 +131,16 @@ class CamoufoxBrowser:
     def open_page(self):
         self.page.goto(URL, wait_until="domcontentloaded", timeout=45000)
 
+    def fetch_fresh_html(self):
+        return self.page.evaluate(
+            "async () => { const r = await fetch('/status_trial_ugphone?t=' + Date.now()); return await r.text(); }"
+        )
+
     def click_refresh(self):
-        print("🔍 Đang thử click refresh (Camoufox)...")
-        
-        try:
-            self.page.click("button.refresh-btn", timeout=3000)
-            print("✅ Click selector thành công")
-            return True
-        except Exception as e:
-            print(f"❌ Click selector fail: {e}")
-        
-        try:
-            self.page.click("text=Làm mới", timeout=3000)
-            print("✅ Click text thành công")
-            return True
-        except Exception as e:
-            print(f"❌ Click text fail: {e}")
-        
-        try:
-            self.page.evaluate("document.querySelector('button.refresh-btn').click()")
-            print("✅ Click JS thành công")
-            return True
-        except Exception as e:
-            print(f"❌ Click JS fail: {e}")
-        
-        try:
-            self.page.evaluate("refreshStatus()")
-            print("✅ Gọi refreshStatus() thành công")
-            return True
-        except Exception as e:
-            print(f"❌ Gọi function fail: {e}")
-        
-        print("⚠️ Tất cả cách click đều fail, reload page...")
-        self.page.goto(URL, wait_until="domcontentloaded", timeout=45000)
-        return False
+        self.page.evaluate(
+            "if (typeof refreshStatus === 'function') { refreshStatus(); } "
+            "else { document.querySelector('button.refresh-btn').click(); }"
+        )
 
     def get_html(self):
         return self.page.content()
@@ -208,7 +171,11 @@ def start_browser():
 def wait_cloudflare(browser, timeout=90):
     start = time.time()
     while time.time() - start < timeout:
-        html = browser.get_html()
+        try:
+            html = browser.get_html()
+        except Exception:
+            time.sleep(3)
+            continue
         if "just a moment" not in html.lower():
             return True
         print("⏳ Đang chờ Cloudflare xác minh...")
@@ -261,15 +228,11 @@ def build_embed(regions):
     for code, info in REGIONS.items():
         status = "🟢 Còn máy" if regions.get(code) else "🔴 Hết máy"
         fields.append({"name": f"{info['flag']} {info['name']}", "value": status, "inline": True})
-    
-    # Dùng giờ từ time.is/Vietnam
-    vn_time = get_time_from_timeis()
-    
     return {
         "title": "📱 Trạng thái UGPhone Trial",
         "color": color,
         "fields": fields,
-        "footer": {"text": f"Uptime: {vn_time}"}
+        "footer": {"text": f"Uptime: {get_time_from_timeis()}"}
     }
 
 def push_embed(regions, msg_id=None):
@@ -300,7 +263,7 @@ def check_and_ping(regions, prev_state):
 # MAIN LOOP
 # =====================================================================
 def main():
-    print(f"🏁 Bắt đầu relay {DURATION_MINUTES} phút (giữ browser mở)...")
+    print(f"🏁 Bắt đầu relay {DURATION_MINUTES} phút (XHR mode, watchdog 20s)...")
     start_time = time.time()
 
     msg_id, prev_state = load_state()
@@ -316,10 +279,7 @@ def main():
         print("⚠️ Cloudflare chưa qua")
 
     while (time.time() - start_time) / 60 < DURATION_MINUTES:
-        now = time.time()
-
-        # CHECK MỖI 1 PHÚT
-        if now >= next_check:
+        if time.time() >= next_check:
             check_count += 1
             try:
                 if browser is None:
@@ -328,29 +288,49 @@ def main():
                         wait_cloudflare(browser)
 
                 if browser:
-                    html = browser.get_html()
-                    if "just a moment" in html.lower():
-                        print("⚠️ Cloudflare xuất hiện lại")
-                        if not wait_cloudflare(browser, 60):
+                    html = None
+                    via = "XHR"
+
+                    # CÁCH 1: XHR đồng bộ (nhanh vài giây)
+                    try:
+                        html = browser.fetch_fresh_html()
+                    except Exception as e:
+                        print(f"⚠️ XHR lỗi: {e}")
+
+                    # CÁCH 2: bấm Làm mới + đọc DOM
+                    if not html or 'status-card' not in html:
+                        via = "DOM"
+                        try:
+                            browser.click_refresh()
+                            time.sleep(4)
+                            html = browser.get_html()
+                        except Exception as e:
+                            print(f"⚠️ DOM lỗi: {e}")
+
+                    # Nếu dính Cloudflare → xác minh lại
+                    if html and "just a moment" in html.lower():
+                        print("⚠️ Cloudflare xuất hiện lại, chờ xác minh...")
+                        if wait_cloudflare(browser, 60):
+                            try:
+                                html = browser.fetch_fresh_html()
+                            except Exception:
+                                html = None
+                        else:
                             browser.close()
                             browser = None
                             raise Exception("CF block")
 
-                    # BẤM NÚT LÀM MỚI
-                    click_success = browser.click_refresh()
-                    time.sleep(2 if click_success else 5)
-
-                    html = browser.get_html()
-                    regions = parse_html(html)
-
-                    check_and_ping(regions, prev_state)
-                    prev_state = regions
-                    last_regions = regions
-                    msg_id = push_embed(regions, msg_id)
-                    save_state(msg_id, regions)
-
-                    ket_qua = ", ".join(f"{c}: {bool(regions.get(c))}" for c in ['SG', 'HK', 'JP', 'DE', 'US'])
-                    print(f"🔄 Check lần {check_count} [{get_hhmm()}]: {ket_qua}")
+                    if html and 'status-card' in html:
+                        regions = parse_html(html)
+                        check_and_ping(regions, prev_state)
+                        prev_state = regions
+                        last_regions = regions
+                        msg_id = push_embed(regions, msg_id)
+                        save_state(msg_id, regions)
+                        ket_qua = ", ".join(f"{c}: {bool(regions.get(c))}" for c in ['SG', 'HK', 'JP', 'DE', 'US'])
+                        print(f"🔄 Check lần {check_count} [{get_hhmm()}] ({via}): {ket_qua}")
+                    else:
+                        print(f"🔄 Check lần {check_count}: ❌ Chưa lấy được dữ liệu")
                 else:
                     print(f"🔄 Check lần {check_count}: ❌ Không mở được browser")
             except Exception as e:
@@ -362,10 +342,9 @@ def main():
 
             next_check = max(next_check + CHECK_INTERVAL, time.time())
 
-        # REFRESH FOOTER 30s (ĐỘC LẬP, KHÔNG LIÊN QUAN CHECK)
+        # FOOTER ĐỘC LẬP 30s (lấy giờ từ time.is)
         if time.time() >= next_footer:
             msg_id = push_embed(last_regions, msg_id)
-            print(f"🕐 Refresh footer: {get_hhmm()}")
             next_footer = time.time() + FOOTER_INTERVAL
 
         time.sleep(2)
