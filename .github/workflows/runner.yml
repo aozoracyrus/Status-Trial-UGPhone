@@ -1,7 +1,6 @@
 name: 🔍 Check Status Trial UGPhone
 
 on:
-  # ✅ CHỈ CÒN: nút "Run workflow" (bấm tay) + relay tự trigger qua API
   workflow_dispatch:
 
 permissions:
@@ -52,7 +51,14 @@ jobs:
         git config --local user.name "GitHub Action"
         git add data/
         git diff --staged --quiet || git commit -m "Relay: Save state at minute 345"
-        git push
+
+        # ✅ FIX: kéo commit mới từ remote về trước khi push
+        # (chống lỗi "rejected - fetch first" khi có người sửa file lúc job đang chạy)
+        git pull --rebase origin main || {
+          git rebase --abort
+          git pull --no-edit -X ours origin main || true
+        }
+        git push origin main
       env:
         GITHUB_TOKEN: ${{ secrets.PAT }}
 
