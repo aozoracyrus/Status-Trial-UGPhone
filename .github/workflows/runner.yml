@@ -1,25 +1,28 @@
-name: 6h Relay Runner
+name: 🔍 Check Status Trial UGPhone
 
 on:
+  # ✅ CHỈ CÒN: nút "Run workflow" (bấm tay) + relay tự trigger qua API
   workflow_dispatch:
-  # Chạy dự phòng mỗi 12 tiếng (nếu chuỗi relay bị đứt hoặc PAT không kích hoạt)
-  schedule:
-    - cron: '0 */12 * * *'
+
+permissions:
+  contents: write
 
 jobs:
   run-relay:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.PAT }}
 
     - name: Setup Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-        cache: 'pip' # Cache để khởi động nhanh hơn
+        cache: 'pip'
 
     - name: Install Chrome & Dependencies
       run: |
@@ -44,23 +47,20 @@ jobs:
         ROLE_PING_ID: ${{ secrets.ROLE_PING_ID }}
 
     - name: Commit State (Save Message ID)
-      # Bước này chạy NGAY SA KHI python kết thúc (phút 345)
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         git add data/
-        # Chỉ commit nếu có thay đổi
         git diff --staged --quiet || git commit -m "Relay: Save state at minute 345"
         git push
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.PAT }}
 
     - name: Trigger Next Runner
-      # Kích hoạt job tiếp theo ngay lập tức
       run: |
         curl -L \
           -X POST \
           -H "Accept: application/vnd.github+json" \
           -H "Authorization: Bearer ${{ secrets.PAT }}" \
           https://api.github.com/repos/${{ github.repository }}/actions/workflows/runner.yml/dispatches \
-          -d '{"ref":"main"}' 
+          -d '{"ref":"main"}'
