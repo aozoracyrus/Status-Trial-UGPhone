@@ -17,6 +17,7 @@ ROLE_PING_ID = os.environ.get('ROLE_PING_ID')
 DURATION_MINUTES = 345
 CHECK_INTERVAL = 60
 PING_AUTO_DELETE = 300
+HEALTH_CHECK_TIMEOUT = 10  # Thời gian kiểm tra browser sống
 
 DATA_DIR = "data"
 MSG_ID_FILE = os.path.join(DATA_DIR, "message_id.txt")
@@ -29,6 +30,14 @@ REGIONS = {
     'DE': {'name': 'Germany', 'flag': '🇩🇪'},
     'US': {'name': 'America', 'flag': '🇺🇸'}
 }
+
+# Các keyword cho biết browser đã chết (cần restart)
+BROWSER_DEAD_KEYWORDS = [
+    'httpconnectionpool', 'localhost', 'timeout', 'read timeout',
+    'failed to execute', 'invalid selector', 'session info',
+    'target closed', 'connection refused', 'browser has been closed',
+    'no such window', 'no target', 'target page, context or browser'
+]
 
 # =====================================================================
 # GIỜ 24H CHUẨN
@@ -44,8 +53,7 @@ def get_time_24h():
     except Exception:
         pass
     try:
-        res = requests.get("https://time.is/Vietnam", timeout=5,
-                           headers={'User-Agent': 'Mozilla/5.0'})
+        res = requests.get("https://time.is/Vietnam", timeout=5, headers={'User-Agent': 'Mozilla/5.0'})
         t = res.text
         hh = mm = None
         m = re.search(r'id="clock"[^>]*>(\d{1,2}):(\d{2})', t)
@@ -80,8 +88,13 @@ def ensure_data_dir():
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
 
+def is_browser_dead_error(error_msg):
+    """Kiểm tra lỗi có phải do browser chết không"""
+    msg = str(error_msg).lower()
+    return any(keyword in msg for keyword in BROWSER_DEAD_KEYWORDS)
+
 # =====================================================================
-# BROWSER (XHR + WATCHDOG 20s + NULL-GUARD)
+# BROWSER (có health check + auto-restart)
 # =====================================================================
 class SeleniumBaseBrowser:
     def __init__(self):
@@ -90,9 +103,18 @@ class SeleniumBaseBrowser:
         self.driver.set_page_load_timeout(20)
         self.driver.set_script_timeout(20)
         self.name = "SeleniumBase UC"
+        self.started_at = time.time()
 
     def open_page(self):
         self.driver.uc_open_with_reconnect(URL, reconnect_time=7)
+
+    def is_alive(self):
+        """Health check: thử lấy page_source nhanh"""
+        try:
+            _ = self.driver.page_source
+            return True
+        except Exception:
+            return False
 
     def fetch_fresh_html(self):
         js = """
@@ -104,7 +126,6 @@ class SeleniumBaseBrowser:
         return self.driver.execute_script(js, URL)
 
     def click_refresh(self):
-        # ✅ NULL-GUARD: không nổ lỗi nếu nút không tồn tại (trang CF)
         self.driver.execute_script(
             "if (typeof refreshStatus === 'function') { refreshStatus(); } "
             "else { var b = document.querySelector('button.refresh-btn'); if (b) { b.click(); } }"
@@ -125,9 +146,17 @@ class CamoufoxBrowser:
         self.browser = self.cm.__enter__()
         self.page = self.browser.new_page()
         self.name = "Camoufox"
+        self.started_at = time.time()
 
     def open_page(self):
         self.page.goto(URL, wait_until="domcontentloaded", timeout=45000)
+
+    def is_alive(self):
+        try:
+            _ = self.page.content()
+            return True
+        except Exception:
+            return False
 
     def fetch_fresh_html(self):
         return self.page.evaluate(
@@ -166,6 +195,20 @@ def start_browser():
         return None
 
 
+def restart_browser(browser):
+    """✅ FIX MỚI: Restart browser khi chết - đóng cũ, mở mới, vượt CF lại"""
+    print("🔄 Đang restart browser...")
+    if browser:
+        try: browser.close()
+        except Exception: pass
+    time.sleep(3)  # Đợi process cũ giải phóng
+    new_browser = start_browser()
+    if new_browser:
+        wait_cloudflare(new_browser)
+        print(f"✅ Browser đã được restart thành công")
+    return new_browser
+
+
 def wait_cloudflare(browser, timeout=90):
     start = time.time()
     while time.time() - start < timeout:
@@ -182,12 +225,9 @@ def wait_cloudflare(browser, timeout=90):
 
 
 def recover_cloudflare(browser):
-    """✅ FIX MỚI: Khôi phục khi Cloudflare chặn lại.
-    Chờ xác minh xong → điều hướng VỀ LẠI trang status → lấy HTML mới."""
     print("⚠️ Cloudflare xuất hiện lại, đang khôi phục...")
     if not wait_cloudflare(browser, 90):
         return None
-    # Quay về đúng trang status (browser đang đứng ở trang CF)
     try:
         browser.open_page()
     except Exception:
@@ -294,10 +334,10 @@ def check_and_ping(regions, prev_state):
             print(f"⚠️ Lỗi gửi ping: {e}")
 
 # =====================================================================
-# MAIN LOOP
+# MAIN LOOP (với cơ chế auto-restart khi browser chết)
 # =====================================================================
 def main():
-    print(f"🏁 Bắt đầu relay {DURATION_MINUTES} phút...")
+    print(f"🏁 Bắt đầu relay {DURATION_MINUTES} phút (auto-restart browser nếu chết)...")
     start_time = time.time()
 
     msg_id, prev_state = load_state()
@@ -305,6 +345,7 @@ def main():
 
     last_regions = prev_state if prev_state else {c: False for c in REGIONS}
     check_count = 0
+    restart_count = 0
     next_check = time.time()
     next_footer = time.time() + seconds_until_next_minute()
 
@@ -315,78 +356,102 @@ def main():
     while (time.time() - start_time) / 60 < DURATION_MINUTES:
         if time.time() >= next_check:
             check_count += 1
+            browser_needs_restart = False
+            
             try:
-                if browser is None:
-                    browser = start_browser()
-                    if browser:
-                        wait_cloudflare(browser)
+                # 🔍 Health check trước khi check
+                if browser is None or not browser.is_alive():
+                    print(f"💀 Browser đã chết sau {int((time.time()-start_time)/60)} phút")
+                    browser = restart_browser(browser)
+                    if browser is None:
+                        print(f"🔄 Check lần {check_count}: ❌ Không khởi động lại được browser")
+                        next_check = max(next_check + CHECK_INTERVAL, time.time())
+                        continue
 
-                if browser:
-                    html = None
-                    via = "XHR"
-
-                    # CÁCH 1: XHR đồng bộ
-                    try:
-                        html = browser.fetch_fresh_html()
-                    except Exception as e:
+                # CÁCH 1: XHR đồng bộ
+                html = None
+                via = "XHR"
+                try:
+                    html = browser.fetch_fresh_html()
+                except Exception as e:
+                    error_str = str(e)
+                    if is_browser_dead_error(error_str):
+                        print(f"💀 XHR phát hiện browser chết: {error_str[:80]}...")
+                        browser = restart_browser(browser)
+                        restart_count += 1
+                        # Thử lại XHR với browser mới
+                        try:
+                            html = browser.fetch_fresh_html()
+                        except Exception:
+                            html = None
+                    else:
                         print(f"⚠️ XHR lỗi: {e}")
 
-                    # ✅ Nếu dính CF → khôi phục (chờ + về lại trang)
+                # Nếu dính CF → khôi phục
+                if html and "just a moment" in html.lower():
+                    html = recover_cloudflare(browser)
+                    if html is None:
+                        browser = restart_browser(browser)
+                        restart_count += 1
+                        try:
+                            html = browser.fetch_fresh_html()
+                        except Exception:
+                            html = None
+
+                # CÁCH 2: DOM fallback (nếu XHR hỏng mà không phải lỗi chết)
+                if not html or 'status-card' not in html:
+                    via = "DOM"
+                    try:
+                        browser.click_refresh()
+                        time.sleep(4)
+                        html = browser.get_html()
+                    except Exception as e:
+                        error_str = str(e)
+                        if is_browser_dead_error(error_str):
+                            print(f"💀 DOM phát hiện browser chết: {error_str[:80]}...")
+                            browser = restart_browser(browser)
+                            restart_count += 1
+                            try:
+                                html = browser.fetch_fresh_html()
+                            except Exception:
+                                html = None
+                        else:
+                            print(f"⚠️ DOM lỗi: {e}")
+
                     if html and "just a moment" in html.lower():
                         html = recover_cloudflare(browser)
                         if html is None:
-                            browser.close()
-                            browser = None
-                            raise Exception("CF block")
+                            browser = restart_browser(browser)
+                            restart_count += 1
 
-                    # CÁCH 2: XHR hỏng (không phải CF) → DOM
-                    if not html or 'status-card' not in html:
-                        via = "DOM"
-                        try:
-                            browser.click_refresh()
-                            time.sleep(4)
-                            html = browser.get_html()
-                        except Exception as e:
-                            print(f"⚠️ DOM lỗi: {e}")
-
-                        if html and "just a moment" in html.lower():
-                            html = recover_cloudflare(browser)
-                            if html is None:
-                                browser.close()
-                                browser = None
-                                raise Exception("CF block")
-
-                    if html and 'status-card' in html:
-                        regions = parse_html(html)
-                        check_and_ping(regions, prev_state)
-                        prev_state = regions
-                        last_regions = regions
-                        msg_id = push_embed(regions, msg_id)
-                        save_state(msg_id, regions)
-                        ket_qua = ", ".join(f"{c}: {bool(regions.get(c))}" for c in ['SG', 'HK', 'JP', 'DE', 'US'])
-                        print(f"🔄 Check lần {check_count} [{get_hhmm()}] ({via}): {ket_qua}")
-                    else:
-                        print(f"🔄 Check lần {check_count}: ❌ Chưa lấy được dữ liệu")
+                # Parse kết quả
+                if html and 'status-card' in html:
+                    regions = parse_html(html)
+                    check_and_ping(regions, prev_state)
+                    prev_state = regions
+                    last_regions = regions
+                    msg_id = push_embed(regions, msg_id)
+                    save_state(msg_id, regions)
+                    ket_qua = ", ".join(f"{c}: {bool(regions.get(c))}" for c in ['SG', 'HK', 'JP', 'DE', 'US'])
+                    print(f"🔄 Check lần {check_count} [{get_hhmm()}] ({via}): {ket_qua}")
                 else:
-                    print(f"🔄 Check lần {check_count}: ❌ Không mở được browser")
+                    print(f"🔄 Check lần {check_count}: ❌ Chưa lấy được dữ liệu")
             except Exception as e:
-                print(f"🔄 Check lần {check_count}: ❌ Lỗi: {e}")
-                try:
-                    if browser: browser.close()
-                except Exception: pass
-                browser = None
+                print(f"🔄 Check lần {check_count}: ❌ Lỗi tổng: {e}")
+                browser = restart_browser(browser)
+                restart_count += 1
 
             next_check = max(next_check + CHECK_INTERVAL, time.time())
 
         # FOOTER ĐÚNG GIÂY 00
         if time.time() >= next_footer:
             msg_id = push_embed(last_regions, msg_id)
-            print(f"🕐 Footer cập nhật lúc {get_hhmm()}:00")
+            print(f"🕐 Footer cập nhật lúc {get_hhmm()}:00 (browser đã restart {restart_count} lần)")
             next_footer = time.time() + seconds_until_next_minute()
 
         time.sleep(1)
 
-    print("⏰ Hết 345 phút. Bàn giao...")
+    print(f"⏰ Hết 345 phút. Bàn giao... (browser đã restart {restart_count} lần)")
     if browser:
         browser.close()
 
