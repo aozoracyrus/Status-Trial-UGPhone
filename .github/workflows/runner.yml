@@ -45,20 +45,30 @@ jobs:
         DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         ROLE_PING_ID: ${{ secrets.ROLE_PING_ID }}
 
-    - name: Commit State (Save Message ID)
+    - name: Commit State (Force Push nếu cần)
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         git add data/
-        git diff --staged --quiet || git commit -m "Relay: Save state at minute 345"
-
-        # ✅ FIX: kéo commit mới từ remote về trước khi push
-        # (chống lỗi "rejected - fetch first" khi có người sửa file lúc job đang chạy)
-        git pull --rebase origin main || {
-          git rebase --abort
-          git pull --no-edit -X ours origin main || true
+        
+        # Kiểm tra có thay đổi không
+        if git diff --staged --quiet; then
+          echo "Không có thay đổi để commit"
+          exit 0
+        fi
+        
+        git commit -m "Relay: Save state at minute 345"
+        
+        # ✅ FIX: Force push an toàn (chỉ ghi đè nếu remote không thay đổi)
+        # State chỉ là cache, nếu bị mất thì job sau sẽ tự tạo lại
+        git push --force-with-lease origin main || {
+          echo "⚠️ Force push fail, thử reset và push lại..."
+          git fetch origin main
+          git reset --soft origin/main
+          git add data/
+          git commit -m "Relay: Save state (force)" || true
+          git push origin main
         }
-        git push origin main
       env:
         GITHUB_TOKEN: ${{ secrets.PAT }}
 
