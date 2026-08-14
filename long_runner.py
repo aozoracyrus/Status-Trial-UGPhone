@@ -17,6 +17,7 @@ ROLE_PING_ID = os.environ.get('ROLE_PING_ID')
 DURATION_MINUTES = 345
 CHECK_INTERVAL = 60
 PING_AUTO_DELETE = 300
+BROWSER_LIFETIME_MINUTES = 60  # ✅ Restart browser mỗi 60 phút (trước khi nó chết)
 
 DATA_DIR = "data"
 MSG_ID_FILE = os.path.join(DATA_DIR, "message_id.txt")
@@ -91,8 +92,46 @@ def is_browser_dead_error(error_msg):
     return any(keyword in msg for keyword in BROWSER_DEAD_KEYWORDS)
 
 # =====================================================================
-# BROWSER CLASSES
+# BROWSER CLASSES (Camoufox ưu tiên vì ổn định hơn)
 # =====================================================================
+class CamoufoxBrowser:
+    def __init__(self):
+        from camoufox.sync_api import Camoufox
+        self.cm = Camoufox(headless=True, block_images=True)
+        self.browser = self.cm.__enter__()
+        self.page = self.browser.new_page()
+        self.name = "Camoufox"
+        self.started_at = time.time()
+
+    def open_page(self):
+        self.page.goto(URL, wait_until="domcontentloaded", timeout=45000)
+
+    def is_alive(self):
+        try:
+            _ = self.page.content()
+            return True
+        except Exception:
+            return False
+
+    def fetch_fresh_html(self):
+        return self.page.evaluate(
+            "async () => { const r = await fetch('/status_trial_ugphone?t=' + Date.now()); return await r.text(); }"
+        )
+
+    def click_refresh(self):
+        self.page.evaluate(
+            "if (typeof refreshStatus === 'function') { refreshStatus(); } "
+            "else { var b = document.querySelector('button.refresh-btn'); if (b) { b.click(); } }"
+        )
+
+    def get_html(self):
+        return self.page.content()
+
+    def close(self):
+        try: self.cm.__exit__(None, None, None)
+        except Exception: pass
+
+
 class SeleniumBaseBrowser:
     def __init__(self):
         from seleniumbase import Driver
@@ -135,97 +174,71 @@ class SeleniumBaseBrowser:
         except Exception: pass
 
 
-class CamoufoxBrowser:
-    def __init__(self):
-        from camoufox.sync_api import Camoufox
-        self.cm = Camoufox(headless=True, block_images=True)
-        self.browser = self.cm.__enter__()
-        self.page = self.browser.new_page()
-        self.name = "Camoufox"
-        self.started_at = time.time()
-
-    def open_page(self):
-        self.page.goto(URL, wait_until="domcontentloaded", timeout=45000)
-
-    def is_alive(self):
+def start_browser(prefer_camoufox=True):
+    """✅ Ưu tiên Camoufox (ổn định hơn trong long-run)"""
+    if prefer_camoufox:
         try:
-            _ = self.page.content()
-            return True
-        except Exception:
-            return False
-
-    def fetch_fresh_html(self):
-        return self.page.evaluate(
-            "async () => { const r = await fetch('/status_trial_ugphone?t=' + Date.now()); return await r.text(); }"
-        )
-
-    def click_refresh(self):
-        self.page.evaluate(
-            "if (typeof refreshStatus === 'function') { refreshStatus(); } "
-            "else { var b = document.querySelector('button.refresh-btn'); if (b) { b.click(); } }"
-        )
-
-    def get_html(self):
-        return self.page.content()
-
-    def close(self):
-        try: self.cm.__exit__(None, None, None)
-        except Exception: pass
-
-
-def start_browser(prefer_selenium=True):
-    """Khởi động browser, ưu tiên SeleniumBase hoặc Camoufox"""
-    if prefer_selenium:
-        try:
-            b = SeleniumBaseBrowser()
+            b = CamoufoxBrowser()
             b.open_page()
+            # ✅ Sleep 10s để browser ổn định hoàn toàn
+            time.sleep(10)
             print(f"✅ Đã mở browser: {b.name}")
             return b
         except Exception as e:
-            print(f"❌ Lỗi SeleniumBase: {e}")
+            print(f"❌ Lỗi Camoufox: {e}")
     
-    # Fallback sang Camoufox
+    # Fallback sang SeleniumBase
     try:
-        b = CamoufoxBrowser()
+        b = SeleniumBaseBrowser()
         b.open_page()
+        time.sleep(10)
         print(f"✅ Đã mở browser: {b.name}")
         return b
     except Exception as e:
-        print(f"❌ Lỗi Camoufox: {e}")
+        print(f"❌ Lỗi SeleniumBase: {e}")
         return None
 
 
-def restart_browser(browser, consecutive_failures):
-    """✅ SMART RESTART: Chờ lâu hơn nếu restart nhiều lần + switch browser"""
-    
-    # Tính thời gian chờ dựa trên số lần restart liên tiếp
-    if consecutive_failures <= 2:
-        wait_time = 3  # Bình thường chờ 3s
-    elif consecutive_failures <= 5:
-        wait_time = 15  # Restart nhiều → chờ 15s
-    else:
-        wait_time = 30  # Restart quá nhiều → chờ 30s
-    
-    print(f"🔄 Đang restart browser (lần thứ {consecutive_failures}, chờ {wait_time}s)...")
+def proactive_restart(browser, reason="định kỳ"):
+    """✅ Proactive restart: restart trước khi browser chết"""
+    print(f"🔄 Proactive restart ({reason})...")
     
     if browser:
         try: browser.close()
         except Exception: pass
     
-    time.sleep(wait_time)  # Đợi process cũ giải phóng
+    time.sleep(15)  # Chờ 15s để giải phóng hoàn toàn
     
-    # Nếu restart > 5 lần → switch browser
-    prefer_selenium = consecutive_failures <= 5
-    if consecutive_failures > 5:
-        print("⚠️ Restart quá nhiều lần, chuyển sang browser dự phòng...")
-        prefer_selenium = not (browser.name == "SeleniumBase UC" if browser else True)
-    
-    new_browser = start_browser(prefer_selenium)
+    new_browser = start_browser(prefer_camoufox=True)
     if new_browser:
         wait_cloudflare(new_browser)
-        # ✅ Sleep thêm 5s để browser ổn định trước khi XHR
-        time.sleep(5)
+        time.sleep(5)  # Sleep thêm 5s để ổn định
         print(f"✅ Browser {new_browser.name} đã restart thành công")
+    return new_browser
+
+
+def emergency_restart(browser, consecutive_failures):
+    """Emergency restart: khi browser chết bất ngờ"""
+    wait_time = 3 if consecutive_failures <= 2 else (15 if consecutive_failures <= 5 else 30)
+    print(f"💀 Emergency restart (lần {consecutive_failures}, chờ {wait_time}s)...")
+    
+    if browser:
+        try: browser.close()
+        except Exception: pass
+    
+    time.sleep(wait_time)
+    
+    # Switch browser nếu restart quá nhiều
+    prefer_camoufox = consecutive_failures <= 5
+    if consecutive_failures > 5:
+        print("⚠️ Restart quá nhiều, switch browser...")
+        prefer_camoufox = not (browser.name == "Camoufox" if browser else True)
+    
+    new_browser = start_browser(prefer_camoufox)
+    if new_browser:
+        wait_cloudflare(new_browser)
+        time.sleep(5)
+        print(f"✅ Browser {new_browser.name} đã emergency restart thành công")
     return new_browser
 
 
@@ -354,10 +367,10 @@ def check_and_ping(regions, prev_state):
             print(f"⚠️ Lỗi gửi ping: {e}")
 
 # =====================================================================
-# MAIN LOOP (với Smart Restart Strategy)
+# MAIN LOOP (Proactive Restart Strategy)
 # =====================================================================
 def main():
-    print(f"🏁 Bắt đầu relay {DURATION_MINUTES} phút (Smart Restart)...")
+    print(f"🏁 Bắt đầu relay {DURATION_MINUTES} phút (Proactive Restart mỗi {BROWSER_LIFETIME_MINUTES}p)...")
     start_time = time.time()
 
     msg_id, prev_state = load_state()
@@ -366,15 +379,29 @@ def main():
     last_regions = prev_state if prev_state else {c: False for c in REGIONS}
     check_count = 0
     restart_count = 0
-    consecutive_failures = 0  # ✅ Đếm số lần restart liên tiếp
+    consecutive_failures = 0
     next_check = time.time()
     next_footer = time.time() + seconds_until_next_minute()
+    next_proactive_restart = time.time() + (BROWSER_LIFETIME_MINUTES * 60)  # ✅ Proactive restart timer
 
-    browser = start_browser(prefer_selenium=True)
+    browser = start_browser(prefer_camoufox=True)
     if browser and not wait_cloudflare(browser):
         print("⚠️ Cloudflare chưa qua")
 
     while (time.time() - start_time) / 60 < DURATION_MINUTES:
+        # ✅ PROACTIVE RESTART: Restart browser định kỳ trước khi nó chết
+        if time.time() >= next_proactive_restart:
+            browser_age = (time.time() - browser.started_at) / 60 if browser else 0
+            print(f"⏰ Browser đã chạy {int(browser_age)} phút, proactive restart...")
+            browser = proactive_restart(browser, "định kỳ")
+            restart_count += 1
+            consecutive_failures = 0
+            next_proactive_restart = time.time() + (BROWSER_LIFETIME_MINUTES * 60)
+            if browser is None:
+                print("❌ Proactive restart fail, đợi 1 phút thử lại...")
+                time.sleep(60)
+                continue
+
         if time.time() >= next_check:
             check_count += 1
             check_success = False
@@ -382,9 +409,9 @@ def main():
             try:
                 # Health check trước khi check
                 if browser is None or not browser.is_alive():
-                    print(f"💀 Browser đã chết sau {int((time.time()-start_time)/60)} phút")
+                    print(f"💀 Browser đã chết sau {int((time.time()-browser.started_at)/60)} phút")
                     consecutive_failures += 1
-                    browser = restart_browser(browser, consecutive_failures)
+                    browser = emergency_restart(browser, consecutive_failures)
                     restart_count += 1
                     if browser is None:
                         print(f"🔄 Check lần {check_count}: ❌ Không khởi động lại được browser")
@@ -401,7 +428,7 @@ def main():
                     if is_browser_dead_error(error_str):
                         print(f"💀 XHR phát hiện browser chết: {error_str[:80]}...")
                         consecutive_failures += 1
-                        browser = restart_browser(browser, consecutive_failures)
+                        browser = emergency_restart(browser, consecutive_failures)
                         restart_count += 1
                         # Thử lại XHR với browser mới
                         try:
@@ -416,14 +443,14 @@ def main():
                     html = recover_cloudflare(browser)
                     if html is None:
                         consecutive_failures += 1
-                        browser = restart_browser(browser, consecutive_failures)
+                        browser = emergency_restart(browser, consecutive_failures)
                         restart_count += 1
                         try:
                             html = browser.fetch_fresh_html()
                         except Exception:
                             html = None
 
-                # CÁCH 2: DOM fallback (nếu XHR hỏng mà không phải lỗi chết)
+                # CÁCH 2: DOM fallback
                 if not html or 'status-card' not in html:
                     via = "DOM"
                     try:
@@ -435,7 +462,7 @@ def main():
                         if is_browser_dead_error(error_str):
                             print(f"💀 DOM phát hiện browser chết: {error_str[:80]}...")
                             consecutive_failures += 1
-                            browser = restart_browser(browser, consecutive_failures)
+                            browser = emergency_restart(browser, consecutive_failures)
                             restart_count += 1
                             try:
                                 html = browser.fetch_fresh_html()
@@ -448,7 +475,7 @@ def main():
                         html = recover_cloudflare(browser)
                         if html is None:
                             consecutive_failures += 1
-                            browser = restart_browser(browser, consecutive_failures)
+                            browser = emergency_restart(browser, consecutive_failures)
                             restart_count += 1
 
                 # Parse kết quả
@@ -462,13 +489,13 @@ def main():
                     ket_qua = ", ".join(f"{c}: {bool(regions.get(c))}" for c in ['SG', 'HK', 'JP', 'DE', 'US'])
                     print(f"🔄 Check lần {check_count} [{get_hhmm()}] ({via}): {ket_qua}")
                     check_success = True
-                    consecutive_failures = 0  # ✅ Reset counter khi thành công
+                    consecutive_failures = 0
                 else:
                     print(f"🔄 Check lần {check_count}: ❌ Chưa lấy được dữ liệu")
             except Exception as e:
                 print(f"🔄 Check lần {check_count}: ❌ Lỗi tổng: {e}")
                 consecutive_failures += 1
-                browser = restart_browser(browser, consecutive_failures)
+                browser = emergency_restart(browser, consecutive_failures)
                 restart_count += 1
 
             next_check = max(next_check + CHECK_INTERVAL, time.time())
@@ -476,7 +503,7 @@ def main():
         # FOOTER ĐÚNG GIÂY 00
         if time.time() >= next_footer:
             msg_id = push_embed(last_regions, msg_id)
-            print(f"🕐 Footer cập nhật lúc {get_hhmm()}:00 (restart: {restart_count}, consecutive fails: {consecutive_failures})")
+            print(f"🕐 Footer cập nhật lúc {get_hhmm()}:00 (restart: {restart_count}, consecutive: {consecutive_failures})")
             next_footer = time.time() + seconds_until_next_minute()
 
         time.sleep(1)
