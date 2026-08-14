@@ -17,7 +17,7 @@ ROLE_PING_ID = os.environ.get('ROLE_PING_ID')
 DURATION_MINUTES = 345
 CHECK_INTERVAL = 60
 PING_AUTO_DELETE = 300
-BROWSER_LIFETIME_MINUTES = 60  # ✅ Restart browser mỗi 60 phút (trước khi nó chết)
+BROWSER_LIFETIME_MINUTES = 60
 
 DATA_DIR = "data"
 MSG_ID_FILE = os.path.join(DATA_DIR, "message_id.txt")
@@ -92,12 +92,14 @@ def is_browser_dead_error(error_msg):
     return any(keyword in msg for keyword in BROWSER_DEAD_KEYWORDS)
 
 # =====================================================================
-# BROWSER CLASSES (Camoufox ưu tiên vì ổn định hơn)
+# BROWSER CLASSES (Camoufox KHÔNG chặn ảnh để tránh bị Cloudflare phát hiện)
 # =====================================================================
 class CamoufoxBrowser:
     def __init__(self):
         from camoufox.sync_api import Camoufox
-        self.cm = Camoufox(headless=True, block_images=True)
+        # ✅ FIX: Bỏ block_images=True để tránh bị WAF phát hiện
+        # Browser thật luôn load ảnh, nên bot cũng phải load ảnh
+        self.cm = Camoufox(headless=True)
         self.browser = self.cm.__enter__()
         self.page = self.browser.new_page()
         self.name = "Camoufox"
@@ -175,19 +177,16 @@ class SeleniumBaseBrowser:
 
 
 def start_browser(prefer_camoufox=True):
-    """✅ Ưu tiên Camoufox (ổn định hơn trong long-run)"""
     if prefer_camoufox:
         try:
             b = CamoufoxBrowser()
             b.open_page()
-            # ✅ Sleep 10s để browser ổn định hoàn toàn
             time.sleep(10)
             print(f"✅ Đã mở browser: {b.name}")
             return b
         except Exception as e:
             print(f"❌ Lỗi Camoufox: {e}")
     
-    # Fallback sang SeleniumBase
     try:
         b = SeleniumBaseBrowser()
         b.open_page()
@@ -200,25 +199,23 @@ def start_browser(prefer_camoufox=True):
 
 
 def proactive_restart(browser, reason="định kỳ"):
-    """✅ Proactive restart: restart trước khi browser chết"""
     print(f"🔄 Proactive restart ({reason})...")
     
     if browser:
         try: browser.close()
         except Exception: pass
     
-    time.sleep(15)  # Chờ 15s để giải phóng hoàn toàn
+    time.sleep(15)
     
     new_browser = start_browser(prefer_camoufox=True)
     if new_browser:
         wait_cloudflare(new_browser)
-        time.sleep(5)  # Sleep thêm 5s để ổn định
+        time.sleep(5)
         print(f"✅ Browser {new_browser.name} đã restart thành công")
     return new_browser
 
 
 def emergency_restart(browser, consecutive_failures):
-    """Emergency restart: khi browser chết bất ngờ"""
     wait_time = 3 if consecutive_failures <= 2 else (15 if consecutive_failures <= 5 else 30)
     print(f"💀 Emergency restart (lần {consecutive_failures}, chờ {wait_time}s)...")
     
@@ -228,7 +225,6 @@ def emergency_restart(browser, consecutive_failures):
     
     time.sleep(wait_time)
     
-    # Switch browser nếu restart quá nhiều
     prefer_camoufox = consecutive_failures <= 5
     if consecutive_failures > 5:
         print("⚠️ Restart quá nhiều, switch browser...")
@@ -367,10 +363,10 @@ def check_and_ping(regions, prev_state):
             print(f"⚠️ Lỗi gửi ping: {e}")
 
 # =====================================================================
-# MAIN LOOP (Proactive Restart Strategy)
+# MAIN LOOP
 # =====================================================================
 def main():
-    print(f"🏁 Bắt đầu relay {DURATION_MINUTES} phút (Proactive Restart mỗi {BROWSER_LIFETIME_MINUTES}p)...")
+    print(f"🏁 Bắt đầu relay {DURATION_MINUTES} phút (Proactive Restart mỗi {BROWSER_LIFETIME_MINUTES}p, KHÔNG chặn ảnh)...")
     start_time = time.time()
 
     msg_id, prev_state = load_state()
@@ -382,14 +378,13 @@ def main():
     consecutive_failures = 0
     next_check = time.time()
     next_footer = time.time() + seconds_until_next_minute()
-    next_proactive_restart = time.time() + (BROWSER_LIFETIME_MINUTES * 60)  # ✅ Proactive restart timer
+    next_proactive_restart = time.time() + (BROWSER_LIFETIME_MINUTES * 60)
 
     browser = start_browser(prefer_camoufox=True)
     if browser and not wait_cloudflare(browser):
         print("⚠️ Cloudflare chưa qua")
 
     while (time.time() - start_time) / 60 < DURATION_MINUTES:
-        # ✅ PROACTIVE RESTART: Restart browser định kỳ trước khi nó chết
         if time.time() >= next_proactive_restart:
             browser_age = (time.time() - browser.started_at) / 60 if browser else 0
             print(f"⏰ Browser đã chạy {int(browser_age)} phút, proactive restart...")
@@ -407,7 +402,6 @@ def main():
             check_success = False
             
             try:
-                # Health check trước khi check
                 if browser is None or not browser.is_alive():
                     print(f"💀 Browser đã chết sau {int((time.time()-browser.started_at)/60)} phút")
                     consecutive_failures += 1
@@ -418,7 +412,6 @@ def main():
                         next_check = max(next_check + CHECK_INTERVAL, time.time())
                         continue
 
-                # CÁCH 1: XHR đồng bộ
                 html = None
                 via = "XHR"
                 try:
@@ -430,7 +423,6 @@ def main():
                         consecutive_failures += 1
                         browser = emergency_restart(browser, consecutive_failures)
                         restart_count += 1
-                        # Thử lại XHR với browser mới
                         try:
                             html = browser.fetch_fresh_html()
                         except Exception:
@@ -438,7 +430,6 @@ def main():
                     else:
                         print(f"⚠️ XHR lỗi: {e}")
 
-                # Nếu dính CF → khôi phục
                 if html and "just a moment" in html.lower():
                     html = recover_cloudflare(browser)
                     if html is None:
@@ -450,7 +441,6 @@ def main():
                         except Exception:
                             html = None
 
-                # CÁCH 2: DOM fallback
                 if not html or 'status-card' not in html:
                     via = "DOM"
                     try:
@@ -478,7 +468,6 @@ def main():
                             browser = emergency_restart(browser, consecutive_failures)
                             restart_count += 1
 
-                # Parse kết quả
                 if html and 'status-card' in html:
                     regions = parse_html(html)
                     check_and_ping(regions, prev_state)
@@ -500,7 +489,6 @@ def main():
 
             next_check = max(next_check + CHECK_INTERVAL, time.time())
 
-        # FOOTER ĐÚNG GIÂY 00
         if time.time() >= next_footer:
             msg_id = push_embed(last_regions, msg_id)
             print(f"🕐 Footer cập nhật lúc {get_hhmm()}:00 (restart: {restart_count}, consecutive: {consecutive_failures})")
