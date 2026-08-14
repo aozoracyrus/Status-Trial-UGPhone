@@ -18,6 +18,7 @@ DURATION_MINUTES = 345
 CHECK_INTERVAL = 60
 PING_AUTO_DELETE = 300
 BROWSER_LIFETIME_MINUTES = 60
+TIME_CACHE_SECONDS = 30  # Cache giờ trong 30s để tránh fetch time.is nhiều lần
 
 DATA_DIR = "data"
 MSG_ID_FILE = os.path.join(DATA_DIR, "message_id.txt")
@@ -39,47 +40,76 @@ BROWSER_DEAD_KEYWORDS = [
 ]
 
 # =====================================================================
-# GIỜ 24H CHUẨN
+# GIỜ 24H CHUẨN (có cache để tránh fetch nhiều lần)
 # =====================================================================
 MONTHS = {'January':'01','February':'02','March':'03','April':'04','May':'05','June':'06',
           'July':'07','August':'08','September':'09','October':'10','November':'11','December':'12'}
 
+# Cache giờ để đảm bảo log và footer dùng cùng nguồn
+_time_cache = {'time': None, 'last_fetch': 0}
+
 def get_time_24h():
+    """Lấy giờ 24h chuẩn, cache trong 30s để tránh fetch nhiều lần"""
+    now = time.time()
+    
+    # Nếu cache còn hiệu lực (< 30s) → trả về cache
+    if now - _time_cache['last_fetch'] < TIME_CACHE_SECONDS and _time_cache['time']:
+        return _time_cache['time']
+    
+    # Cache hết hạn → fetch mới
+    result = None
+    
+    # Ưu tiên zoneinfo (nhanh, offline)
     try:
         from zoneinfo import ZoneInfo
-        now = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
-        return now.strftime("%H:%M ngày %d/%m/%Y")
+        vn_now = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
+        result = vn_now.strftime("%H:%M ngày %d/%m/%Y")
     except Exception:
         pass
-    try:
-        res = requests.get("https://time.is/Vietnam", timeout=5, headers={'User-Agent': 'Mozilla/5.0'})
-        t = res.text
-        hh = mm = None
-        m = re.search(r'id="clock"[^>]*>(\d{1,2}):(\d{2})', t)
-        ampm = re.search(r'id="ampm"[^>]*>(am|pm)', t)
-        if m:
-            h, mm = int(m.group(1)), m.group(2)
-            if ampm:
-                if ampm.group(1) == 'pm' and h != 12: h += 12
-                if ampm.group(1) == 'am' and h == 12: h = 0
-            hh = h
-        d = re.search(r'(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s*(\w+)\s+(\d{1,2}),\s*(\d{4})', t)
-        if hh is not None and d:
-            return f"{str(hh).zfill(2)}:{mm} ngày {str(int(d.group(2))).zfill(2)}/{MONTHS.get(d.group(1), '??')}/{d.group(3)}"
-    except Exception:
-        pass
-    now = datetime.now(timezone.utc) + timedelta(hours=7)
-    return now.strftime("%H:%M ngày %d/%m/%Y")
+    
+    # Fallback: fetch time.is/Vietnam
+    if result is None:
+        try:
+            res = requests.get("https://time.is/Vietnam", timeout=5, headers={'User-Agent': 'Mozilla/5.0'})
+            t = res.text
+            hh = mm = None
+            m = re.search(r'id="clock"[^>]*>(\d{1,2}):(\d{2})', t)
+            ampm = re.search(r'id="ampm"[^>]*>(am|pm)', t)
+            if m:
+                h, mm = int(m.group(1)), m.group(2)
+                if ampm:
+                    if ampm.group(1) == 'pm' and h != 12: h += 12
+                    if ampm.group(1) == 'am' and h == 12: h = 0
+                hh = h
+            d = re.search(r'(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s*(\w+)\s+(\d{1,2}),\s*(\d{4})', t)
+            if hh is not None and d:
+                result = f"{str(hh).zfill(2)}:{mm} ngày {str(int(d.group(2))).zfill(2)}/{MONTHS.get(d.group(1), '??')}/{d.group(3)}"
+        except Exception:
+            pass
+    
+    # Fallback cuối cùng
+    if result is None:
+        now_dt = datetime.now(timezone.utc) + timedelta(hours=7)
+        result = now_dt.strftime("%H:%M ngày %d/%m/%Y")
+    
+    # Lưu vào cache
+    _time_cache['time'] = result
+    _time_cache['last_fetch'] = now
+    
+    return result
 
 def get_hhmm():
     return get_time_24h().split(' ngày')[0]
 
 def seconds_until_next_minute():
+    """Tính số giây cần đợi để đến giây :00 của phút tiếp theo"""
+    # Dùng zoneinfo cho chính xác
     try:
         from zoneinfo import ZoneInfo
         now = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
     except Exception:
         now = datetime.now(timezone.utc) + timedelta(hours=7)
+    
     next_minute = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
     return max(0, (next_minute - now).total_seconds())
 
@@ -92,14 +122,12 @@ def is_browser_dead_error(error_msg):
     return any(keyword in msg for keyword in BROWSER_DEAD_KEYWORDS)
 
 # =====================================================================
-# BROWSER CLASSES (Camoufox KHÔNG chặn ảnh để tránh bị Cloudflare phát hiện)
+# BROWSER CLASSES
 # =====================================================================
 class CamoufoxBrowser:
     def __init__(self):
         from camoufox.sync_api import Camoufox
-        # ✅ FIX: Bỏ block_images=True để tránh bị WAF phát hiện
-        # Browser thật luôn load ảnh, nên bot cũng phải load ảnh
-        self.cm = Camoufox(headless=True)
+        self.cm = Camoufox(headless=True)  # Không chặn ảnh
         self.browser = self.cm.__enter__()
         self.page = self.browser.new_page()
         self.name = "Camoufox"
@@ -239,7 +267,11 @@ def emergency_restart(browser, consecutive_failures):
 
 
 def wait_cloudflare(browser, timeout=90):
+    """Chờ Cloudflare xác minh, chỉ in log mỗi 15s (giảm spam)"""
     start = time.time()
+    last_log_time = 0
+    log_interval = 15  # Chỉ in log mỗi 15 giây
+    
     while time.time() - start < timeout:
         try:
             html = browser.get_html()
@@ -248,7 +280,14 @@ def wait_cloudflare(browser, timeout=90):
             continue
         if "just a moment" not in html.lower():
             return True
-        print("⏳ Đang chờ Cloudflare xác minh...")
+        
+        # Chỉ in log mỗi 15 giây (giảm spam)
+        now = time.time()
+        if now - last_log_time >= log_interval:
+            elapsed = int(now - start)
+            print(f"⏳ Đang chờ Cloudflare xác minh... (đã chờ {elapsed}s)")
+            last_log_time = now
+        
         time.sleep(5)
     return False
 
