@@ -40,8 +40,9 @@ jobs:
       run: python -m camoufox fetch
 
     - name: Run 345-Minute Loop
-      run: xvfb-run --server-args="-screen 0 1280x1024x24" python long_runner.py
+      run: xvfb-run --server-args="-screen 0 1280x1024x24" python -u long_runner.py
       env:
+        PYTHONUNBUFFERED: "1"
         DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         ROLE_PING_ID: ${{ secrets.ROLE_PING_ID }}
 
