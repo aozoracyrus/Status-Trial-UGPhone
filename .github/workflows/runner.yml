@@ -36,9 +36,6 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Pre-download Camoufox
-      run: python -m camoufox fetch
-
     - name: Run 345-Minute Loop
       run: xvfb-run --server-args="-screen 0 1280x1024x24" python -u long_runner.py
       env:
@@ -47,21 +44,18 @@ jobs:
         ROLE_PING_ID: ${{ secrets.ROLE_PING_ID }}
 
     - name: Commit State (Force Push nếu cần)
+      if: always()
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         git add data/
         
-        # Kiểm tra có thay đổi không
         if git diff --staged --quiet; then
           echo "Không có thay đổi để commit"
           exit 0
         fi
         
         git commit -m "Relay: Save state at minute 345"
-        
-        # ✅ FIX: Force push an toàn (chỉ ghi đè nếu remote không thay đổi)
-        # State chỉ là cache, nếu bị mất thì job sau sẽ tự tạo lại
         git push --force-with-lease origin main || {
           echo "⚠️ Force push fail, thử reset và push lại..."
           git fetch origin main
@@ -73,8 +67,11 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.PAT }}
 
+    # ✅ FIX: Luôn trigger job tiếp theo dù job hiện tại fail
     - name: Trigger Next Runner
+      if: always()
       run: |
+        echo "🚀 Đang trigger job tiếp theo..."
         curl -L \
           -X POST \
           -H "Accept: application/vnd.github+json" \
