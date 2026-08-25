@@ -7,6 +7,7 @@ import threading
 import subprocess
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
+import pytz  # ✅ Dùng pytz thay vì time.is
 
 # =====================================================================
 # CẤU HÌNH
@@ -20,8 +21,8 @@ CHECK_INTERVAL = 60
 PING_AUTO_DELETE = 300
 TIME_CACHE_SECONDS = 30
 
-# ✅ FIX: Tách biệt lifetime cho từng browser
-CAMOUFOX_LIFETIME_MINUTES = 999  # Camoufox KHÔNG proactive restart (gần như vô hạn)
+# Tách biệt lifetime cho từng browser
+CAMOUFOX_LIFETIME_MINUTES = 999  # Camoufox KHÔNG proactive restart
 SELENIUM_LIFETIME_MINUTES = 120  # SeleniumBase restart mỗi 120 phút
 
 DATA_DIR = "data"
@@ -44,65 +45,42 @@ BROWSER_DEAD_KEYWORDS = [
     'official/stable is not installed'
 ]
 
-# =====================================================================
-# GIỜ 24H CHUẨN (có cache)
-# =====================================================================
-MONTHS = {'January':'01','February':'02','March':'03','April':'04','May':'05','June':'06',
-          'July':'07','August':'08','September':'09','October':'10','November':'11','December':'12'}
+# ✅ Dùng pytz cho giờ Việt Nam
+tz_vn = pytz.timezone('Asia/Ho_Chi_Minh')
 
+# =====================================================================
+# GIỜ 24H CHUẨN (dùng pytz, cache 30s)
+# =====================================================================
 _time_cache = {'time': None, 'last_fetch': 0}
 
 def get_time_24h():
+    """Lấy giờ Việt Nam dùng pytz, cache 30s"""
     now = time.time()
     if now - _time_cache['last_fetch'] < TIME_CACHE_SECONDS and _time_cache['time']:
         return _time_cache['time']
     
-    result = None
-    try:
-        from zoneinfo import ZoneInfo
-        vn_now = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
-        result = vn_now.strftime("%H:%M ngày %d/%m/%Y")
-    except Exception:
-        pass
-    
-    if result is None:
-        try:
-            res = requests.get("https://time.is/Vietnam", timeout=5, headers={'User-Agent': 'Mozilla/5.0'})
-            t = res.text
-            hh = mm = None
-            m = re.search(r'id="clock"[^>]*>(\d{1,2}):(\d{2})', t)
-            ampm = re.search(r'id="ampm"[^>]*>(am|pm)', t)
-            if m:
-                h, mm = int(m.group(1)), m.group(2)
-                if ampm:
-                    if ampm.group(1) == 'pm' and h != 12: h += 12
-                    if ampm.group(1) == 'am' and h == 12: h = 0
-                hh = h
-            d = re.search(r'(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s*(\w+)\s+(\d{1,2}),\s*(\d{4})', t)
-            if hh is not None and d:
-                result = f"{str(hh).zfill(2)}:{mm} ngày {str(int(d.group(2))).zfill(2)}/{MONTHS.get(d.group(1), '??')}/{d.group(3)}"
-        except Exception:
-            pass
-    
-    if result is None:
-        now_dt = datetime.now(timezone.utc) + timedelta(hours=7)
-        result = now_dt.strftime("%H:%M ngày %d/%m/%Y")
+    # Dùng pytz để lấy giờ Việt Nam chính xác
+    now_vn = datetime.now(tz_vn)
+    result = now_vn.strftime("%H:%M ngày %d/%m/%Y")
     
     _time_cache['time'] = result
     _time_cache['last_fetch'] = now
     return result
 
 def get_hhmm():
+    """Lấy chỉ HH:MM từ giờ Việt Nam"""
     return get_time_24h().split(' ngày')[0]
 
 def seconds_until_next_minute():
-    try:
-        from zoneinfo import ZoneInfo
-        now = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
-    except Exception:
-        now = datetime.now(timezone.utc) + timedelta(hours=7)
-    next_minute = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
-    return max(0, (next_minute - now).total_seconds())
+    """Tính số giây cần đợi để đến giây :00 của phút tiếp theo (dùng pytz)"""
+    now_vn = datetime.now(tz_vn)
+    
+    # Tạo thời điểm giây :00 của phút tiếp theo
+    next_minute = now_vn.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    
+    # Tính khoảng cách
+    delta = (next_minute - now_vn).total_seconds()
+    return max(0, delta)
 
 def ensure_data_dir():
     if not os.path.exists(DATA_DIR):
@@ -112,7 +90,6 @@ def is_browser_dead_error(error_msg):
     msg = str(error_msg).lower()
     return any(keyword in msg for keyword in BROWSER_DEAD_KEYWORDS)
 
-# ✅ FIX: Hàm đảm bảo Camoufox đã được cài đặt
 def ensure_camoufox_installed():
     """Đảm bảo Camoufox browser đã được fetch trước khi dùng"""
     try:
@@ -137,7 +114,6 @@ def ensure_camoufox_installed():
 # =====================================================================
 class CamoufoxBrowser:
     def __init__(self):
-        # Đảm bảo Camoufox đã được cài trước khi khởi động
         if not ensure_camoufox_installed():
             raise Exception("Không thể cài đặt Camoufox")
         
@@ -250,8 +226,6 @@ def proactive_restart(browser, reason="định kỳ"):
         except Exception: pass
     time.sleep(15)
     
-    # Nếu browser cũ là Camoufox → tiếp tục dùng Camoufox
-    # Nếu browser cũ là SeleniumBase → tiếp tục dùng SeleniumBase
     prefer_camoufox = (browser.name == "Camoufox" if browser else True)
     new_browser = start_browser(prefer_camoufox)
     if new_browser:
@@ -283,7 +257,6 @@ def emergency_restart(browser, consecutive_failures):
 
 
 def wait_cloudflare(browser, timeout=60):
-    """✅ FIX: Giảm timeout xuống 60s, chỉ in log mỗi 15s"""
     start = time.time()
     last_log_time = 0
     log_interval = 15
@@ -423,6 +396,7 @@ def main():
     print(f"🏁 Bắt đầu relay {DURATION_MINUTES} phút...")
     print(f"   Camoufox: KHÔNG proactive restart (lifetime: {CAMOUFOX_LIFETIME_MINUTES}p)")
     print(f"   SeleniumBase: Proactive restart mỗi {SELENIUM_LIFETIME_MINUTES}p")
+    print(f"   Giờ: Dùng pytz (Asia/Ho_Chi_Minh) thay vì time.is")
     start_time = time.time()
 
     msg_id, prev_state = load_state()
@@ -433,13 +407,14 @@ def main():
     restart_count = 0
     consecutive_failures = 0
     next_check = time.time()
+    
+    # ✅ Tính thời điểm cập nhật footer tiếp theo (giây :00)
     next_footer = time.time() + seconds_until_next_minute()
 
     browser = start_browser(prefer_camoufox=True)
     if browser and not wait_cloudflare(browser):
         print("⚠️ Cloudflare chưa qua")
 
-    # Tính thời điểm proactive restart dựa trên browser hiện tại
     if browser:
         next_proactive_restart = time.time() + (browser.lifetime_minutes * 60)
     else:
@@ -447,9 +422,8 @@ def main():
 
     try:
         while (time.time() - start_time) / 60 < DURATION_MINUTES:
-            # ✅ FIX: Chỉ proactive restart nếu KHÔNG phải Camoufox
             if time.time() >= next_proactive_restart and browser:
-                if browser.name != "Camoufox":  # Camoufox không proactive restart
+                if browser.name != "Camoufox":
                     browser_age = (time.time() - browser.started_at) / 60
                     print(f"⏰ Browser {browser.name} đã chạy {int(browser_age)} phút, proactive restart...")
                     browser = proactive_restart(browser, "định kỳ")
@@ -462,7 +436,6 @@ def main():
                         time.sleep(60)
                         continue
                 else:
-                    # Camoufox: reset timer nhưng không restart
                     next_proactive_restart = time.time() + (browser.lifetime_minutes * 60)
 
             if time.time() >= next_check:
@@ -569,9 +542,12 @@ def main():
 
                 next_check = max(next_check + CHECK_INTERVAL, time.time())
 
+            # ✅ Cập nhật footer đúng giây :00 (dùng pytz)
             if time.time() >= next_footer:
                 msg_id = push_embed(last_regions, msg_id)
-                print(f"🕐 Footer cập nhật lúc {get_hhmm()}:00 (restart: {restart_count}, consecutive: {consecutive_failures})")
+                now_vn = datetime.now(tz_vn)
+                print(f"🕐 Footer cập nhật lúc {now_vn.strftime('%H:%M:%S')} (restart: {restart_count}, consecutive: {consecutive_failures})")
+                # Tính thời điểm giây :00 tiếp theo
                 next_footer = time.time() + seconds_until_next_minute()
 
             time.sleep(1)
@@ -579,7 +555,6 @@ def main():
         print(f"⏰ Hết 345 phút. Bàn giao... (browser đã restart {restart_count} lần)")
     
     finally:
-        # ✅ FIX: Đảm bảo cleanup browser dù có lỗi
         if browser:
             try:
                 browser.close()
