@@ -7,7 +7,7 @@
 *Không VPS • Không Render • Không ScraperAPI • Không tốn một xu*
 
 </div>
-
+Để repo hoạt động thì bắt buộc phải nhập token + otp thì mới cho phép hoạt đông nhưng github actions không 24/7 ổn định nên không thể sử dụng
 ---
 
 ## 📖 Mục lục
