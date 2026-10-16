@@ -1,7 +1,7 @@
 # 📜 CHANGELOG
 
 Tất cả những thay đổi đáng chú ý của dự án **Status Trial UGPhone Discord Bot** sẽ được ghi lại trong tài liệu này.
-Hãy đọc nó trước fork nhé mọi người
+Hãy đọc nó trước khi fork nhé mọi người
 
 ---
 
