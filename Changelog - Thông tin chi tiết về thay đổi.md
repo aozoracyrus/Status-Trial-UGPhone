@@ -1,10 +1,11 @@
 # 📜 CHANGELOG
 
 Tất cả những thay đổi đáng chú ý của dự án **Status Trial UGPhone Discord Bot** sẽ được ghi lại trong tài liệu này.
+Hãy đọc nó trước fork nhé mọi người
 
 ---
 
-## [v2.0.0] - 2024-XX-XX (Phiên bản hiện tại: Trang BUY & Tự chữa lỗi)
+## [v2.0.0] - 16/10/2026 (Phiên bản hiện tại: Trang BUY & Tự chữa lỗi)
 
 ### 🔄 Thay đổi lớn
 - **Chuyển nguồn dữ liệu**: Chuyển từ `/status_trial_ugphone` (bị ẩn sau tường đăng nhập Token+OTP) sang `/tools/buydevice_ugphone` (trang mua công khai, không yêu cầu đăng nhập).
