@@ -187,14 +187,13 @@ JS_READ_OPTIONS = """() => {
 }"""
 
 # =====================================================================
-# BROWSER CLASS (FIXED - NO INVALID PARAMS)
+# BROWSER CLASS
 # =====================================================================
 class ProtectedBotBrowser:
     def __init__(self):
         if not ensure_camoufox_installed():
             raise Exception("Camoufox chưa cài")
         from camoufox.sync_api import Camoufox
-        # ✅ FIX: Chỉ dùng tham số hợp lệ
         self.cm = Camoufox(
             headless=True,
             block_images=False
@@ -267,6 +266,38 @@ def create_protected_browser():
     return None
 
 # =====================================================================
+# ✅ THÊM LẠI HÀM WAIT CLOUDFLARE (ĐỢI ĐÚNG CÁCH)
+# =====================================================================
+def wait_cloudflare(browser, timeout=90):
+    """Đợi Cloudflare challenge hoàn tất (tối đa 90 giây)"""
+    start = time.time()
+    last_log = 0
+    
+    while time.time() - start < timeout:
+        try:
+            html = browser.get_html()
+        except Exception:
+            time.sleep(3)
+            continue
+        
+        if "just a moment" not in html.lower():
+            elapsed = int(time.time() - start)
+            if elapsed > 5:  # Chỉ in nếu đợi > 5 giây
+                print(f"✅ Đã qua Cloudflare sau {elapsed}s")
+            return True
+        
+        now = time.time()
+        if now - last_log >= 15:
+            elapsed = int(now - start)
+            print(f"⏳ Đang chờ Cloudflare xác minh... (đã chờ {elapsed}s)")
+            last_log = now
+        
+        time.sleep(5)
+    
+    print(f"❌ Timeout: Cloudflare không qua sau {timeout}s")
+    return False
+
+# =====================================================================
 # DISCORD & STATE
 # =====================================================================
 def load_state():
@@ -331,7 +362,7 @@ def check_and_ping(regions, prev_state):
         except Exception: pass
 
 # =====================================================================
-# MAIN LOGIC
+# MAIN LOGIC (FIXED: WAIT CLOUDFLARE ĐÚNG CÁCH)
 # =====================================================================
 def main():
     print(f"🏁 Bắt đầu bot (Chống Anti-Console + Auto-Recovery)")
@@ -345,6 +376,10 @@ def main():
     if not browser:
         print("❌ Không thể khởi động browser. Kết thúc.")
         return
+
+    # ✅ ĐỢI CLOUDFLARE LẦN ĐẦU
+    if not wait_cloudflare(browser, timeout=120):
+        print("⚠️ Cloudflare chưa qua lần đầu, sẽ thử lại trong loop")
 
     fail_streak = 0
     restart_count = 0
@@ -370,6 +405,11 @@ def main():
                             browser = create_protected_browser()
                             restart_count += 1
                             if not browser: break
+                            
+                            # ✅ ĐỢI CLOUDFLARE SAU KHI TẠO MỚI
+                            if not wait_cloudflare(browser, timeout=90):
+                                print("❌ Cloudflare không qua sau restart")
+                                continue
 
                         if not browser.check_and_fix_url():
                             print("⚠️ Không fix được URL, reload trang...")
@@ -378,11 +418,15 @@ def main():
 
                         html = browser.get_html()
                         
+                        # ✅ FIX: DÙNG wait_cloudflare THAY VÌ sleep 10s
                         if 'just a moment' in html.lower():
-                            print("🛡️ Cloudflare detected. Đợi và retry...")
-                            time.sleep(10)
-                            browser.goto_with_protection(TARGET_URL)
-                            continue
+                            print("🛡️ Cloudflare detected. Đang đợi...")
+                            if not wait_cloudflare(browser, timeout=60):
+                                print("❌ Cloudflare không qua, retry...")
+                                browser.goto_with_protection(TARGET_URL)
+                                if not wait_cloudflare(browser, timeout=60):
+                                    continue
+                            html = browser.get_html()
                         
                         if 'login' in html.lower() and 'token' in html.lower():
                             print("🔐 Trang yêu cầu Login. Thử fallback URL...")
@@ -439,6 +483,10 @@ def main():
                         browser = create_protected_browser()
                         restart_count += 1
                         fail_streak = 0
+                        
+                        # ✅ ĐỢI CLOUDFLARE SAU PANIC RESTART
+                        if browser and not wait_cloudflare(browser, timeout=90):
+                            print("❌ Cloudflare không qua sau panic restart")
                     
                     if fail_streak == FAIL_ALERT_THRESHOLD:
                         send_alert(f"⚠️ Bot fail {fail_streak} lần liên tiếp!")
