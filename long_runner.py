@@ -13,7 +13,7 @@ import pytz
 # CẤU HÌNH
 # =====================================================================
 TARGET_URL = "https://hanaminikata.com/tools/buydevice_ugphone"
-FALLBACK_URL = "https://hanaminikata.com/tc"  # Trang dự phòng
+FALLBACK_URL = "https://hanaminikata.com/tc"
 WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL')
 ROLE_PING_ID = os.environ.get('ROLE_PING_ID')
 
@@ -21,14 +21,14 @@ DURATION_MINUTES = 345
 PING_AUTO_DELETE = 300
 FAIL_RESTART_THRESHOLD = 3
 FAIL_ALERT_THRESHOLD = 10
-MAX_RETRY_PER_CHECK = 3  # Retry 3 lần trước khi báo fail
+MAX_RETRY_PER_CHECK = 3
 
 DATA_DIR = "data"
 MSG_ID_FILE = os.path.join(DATA_DIR, "message_id.txt")
 PREV_STATE_FILE = os.path.join(DATA_DIR, "prev_state.json")
 
 REGIONS = {
-    'SG': {'name': 'Singapore', 'flag': '🇸'},
+    'SG': {'name': 'Singapore', 'flag': '🇸🇬'},
     'HK': {'name': 'Hong Kong', 'flag': '🇭🇰'},
     'JP': {'name': 'Japan', 'flag': '🇯🇵'},
     'DE': {'name': 'Germany', 'flag': '🇩🇪'},
@@ -56,16 +56,13 @@ def ensure_camoufox_installed():
 # 🛡️ SCRIPT CHỐNG ANTI-CONSOLE & REDIRECT
 # =====================================================================
 ANTI_DEBUG_BYPASS = """
-// Vô hiệu hóa anti-debug
 (function() {
-    // Chặn debugger statement
     const originalDebugger = Function.prototype.constructor;
     Function.prototype.constructor = function(code) {
         if (code === 'debugger') return function() {};
         return originalDebugger.apply(this, arguments);
     };
 
-    // Chặn devtools detection
     const originalToString = Function.prototype.toString;
     Function.prototype.toString = function() {
         if (this === console || this === window.console) {
@@ -74,7 +71,6 @@ ANTI_DEBUG_BYPASS = """
         return originalToString.apply(this, arguments);
     };
 
-    // Chặn redirect
     const originalReplace = window.location.replace;
     const originalAssign = window.location.assign;
     window.location.replace = function(url) {
@@ -92,7 +88,6 @@ ANTI_DEBUG_BYPASS = """
         return originalAssign.call(window.location, url);
     };
 
-    // Override history.pushState và replaceState
     const originalPushState = history.pushState;
     const originalReplaceState = history.replaceState;
     history.pushState = function() {
@@ -118,10 +113,6 @@ ANTI_DEBUG_BYPASS = """
 
 CHECK_URL_SCRIPT = """() => {
     return window.location.href;
-}"""
-
-FORCE_NAVIGATE_SCRIPT = """(url) => {
-    window.location.href = url;
 }"""
 
 # =====================================================================
@@ -168,7 +159,6 @@ def regions_complete(regions):
 # JS SCRIPTS
 # =====================================================================
 JS_FIND_AND_CLICK = """() => {
-  // 1. Tìm thẻ select chuẩn
   let el = document.querySelector('select');
   if (el) {
     el.click();
@@ -177,7 +167,6 @@ JS_FIND_AND_CLICK = """() => {
     return { found: true, type: 'select' };
   }
   
-  // 2. Tìm theo text (phòng trường hợp custom dropdown)
   const allElements = document.querySelectorAll('*');
   for (let i = 0; i < allElements.length; i++) {
     if (allElements[i].textContent.includes('Singapore') && allElements[i].children.length < 5) {
@@ -198,19 +187,17 @@ JS_READ_OPTIONS = """() => {
 }"""
 
 # =====================================================================
-# BROWSER CLASS (WITH ANTI-DEBUG PROTECTION)
+# BROWSER CLASS (FIXED - NO INVALID PARAMS)
 # =====================================================================
 class ProtectedBotBrowser:
     def __init__(self):
         if not ensure_camoufox_installed():
             raise Exception("Camoufox chưa cài")
         from camoufox.sync_api import Camoufox
-        # Cấu hình stealth mode tối đa
+        # ✅ FIX: Chỉ dùng tham số hợp lệ
         self.cm = Camoufox(
             headless=True,
-            block_images=False,  # Không chặn ảnh để giống người thật
-            disable_webgl=False,
-            disable_webrtc=False
+            block_images=False
         )
         self.browser = self.cm.__enter__()
         self.page = self.browser.new_page()
@@ -219,12 +206,10 @@ class ProtectedBotBrowser:
         print(f"✅ Browser {self.name} đã khởi động (Anti-debug enabled)")
 
     def goto_with_protection(self, url):
-        """Đi đến trang và inject anti-debug script"""
         try:
             self.page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            time.sleep(3)  # Đợi trang load JS
+            time.sleep(3)
             
-            # Inject anti-debug script
             try:
                 self.page.evaluate(ANTI_DEBUG_BYPASS)
                 print("🛡️ Anti-debug script injected")
@@ -238,7 +223,6 @@ class ProtectedBotBrowser:
             return False
 
     def check_and_fix_url(self):
-        """Kiểm tra URL hiện tại, nếu sai thì ép về trang đích"""
         try:
             current_url = self.page.evaluate(CHECK_URL_SCRIPT)
             if current_url and not ('buydevice' in current_url or 'tc' in current_url):
@@ -263,7 +247,6 @@ class ProtectedBotBrowser:
         return self.page.evaluate(JS_READ_OPTIONS)
 
     def get_html(self):
-        # Kiểm tra URL trước khi lấy HTML
         self.check_and_fix_url()
         return self.page.content()
 
@@ -272,12 +255,11 @@ class ProtectedBotBrowser:
         except Exception: pass
 
 def create_protected_browser():
-    """Hàm tạo browser với retry"""
     for attempt in range(3):
         try:
             b = ProtectedBotBrowser()
             if b.goto_with_protection(TARGET_URL):
-                time.sleep(5)  # Đợi trang ổn định
+                time.sleep(5)
                 return b
         except Exception as e:
             print(f"❌ Lỗi tạo browser lần {attempt+1}: {e}")
@@ -312,7 +294,7 @@ def build_embed(regions):
     fields = [{"name": f"{i['flag']} {i['name']}",
                "value": "🟢 Còn máy" if regions.get(c) else "🔴 Hết máy",
                "inline": True} for c, i in REGIONS.items()]
-    return {"title": " Trạng thái UGPhone Trial", "color": color,
+    return {"title": "📱 Trạng thái UGPhone Trial", "color": color,
             "fields": fields, "footer": {"text": f"Uptime: {get_time_24h()}"}}
 
 def push_embed(regions, msg_id=None):
@@ -333,7 +315,7 @@ def send_alert(content):
     if not WEBHOOK_URL: return
     try:
         requests.post(WEBHOOK_URL, json={"content": content})
-        print(f" Alert: {content[:80]}")
+        print(f"🚨 Alert: {content[:80]}")
     except Exception: pass
 
 def check_and_ping(regions, prev_state):
@@ -342,17 +324,17 @@ def check_and_ping(regions, prev_state):
     if new_stock:
         try:
             r = requests.post(f"{WEBHOOK_URL}?wait=true",
-                              json={"content": f"<@&{ROLE_PING_ID}>  Server **{', '.join(new_stock)}** vừa có máy!"})
+                              json={"content": f"<@&{ROLE_PING_ID}> 🎉 Server **{', '.join(new_stock)}** vừa có máy!"})
             if r.status_code == 200:
                 pid = r.json().get("id")
                 if pid: delete_message_after(pid, PING_AUTO_DELETE)
         except Exception: pass
 
 # =====================================================================
-# MAIN LOGIC (WITH ANTI-REDIRECT PROTECTION)
+# MAIN LOGIC
 # =====================================================================
 def main():
-    print(f" Bắt đầu bot (Chống Anti-Console + Auto-Recovery)")
+    print(f"🏁 Bắt đầu bot (Chống Anti-Console + Auto-Recovery)")
     print(f"   Target: {TARGET_URL}")
     print(f"   Fallback: {FALLBACK_URL}")
     
@@ -380,10 +362,8 @@ def main():
                 via = "NONE"
                 success = False
 
-                # Retry logic
                 for retry in range(MAX_RETRY_PER_CHECK):
                     try:
-                        # 1. Kiểm tra browser sống không
                         if not browser.is_alive():
                             print("💀 Browser chết. Đang tạo mới...")
                             browser.close()
@@ -391,18 +371,15 @@ def main():
                             restart_count += 1
                             if not browser: break
 
-                        # 2. Kiểm tra URL (chống redirect)
                         if not browser.check_and_fix_url():
-                            print("️ Không fix được URL, reload trang...")
+                            print("⚠️ Không fix được URL, reload trang...")
                             browser.goto_with_protection(TARGET_URL)
                             time.sleep(3)
 
-                        # 3. Lấy HTML
                         html = browser.get_html()
                         
-                        # 4. Check Cloudflare/Login
                         if 'just a moment' in html.lower():
-                            print(" Cloudflare detected. Đợi và retry...")
+                            print("🛡️ Cloudflare detected. Đợi và retry...")
                             time.sleep(10)
                             browser.goto_with_protection(TARGET_URL)
                             continue
@@ -416,7 +393,6 @@ def main():
                                 print("❌ Fallback cũng yêu cầu login. Skip phút này.")
                                 break
 
-                        # 5. Click dropdown
                         click_res = browser.click_dropdown()
                         if not click_res or not click_res.get('found'):
                             print(f"⚠️ Không thấy dropdown (lần {retry+1}/{MAX_RETRY_PER_CHECK})")
@@ -425,8 +401,7 @@ def main():
                             time.sleep(3)
                             continue
 
-                        # 6. Đọc options
-                        time.sleep(2)  # Đợi modal mở
+                        time.sleep(2)
                         options = browser.read_options()
                         
                         if options and len(options) > 10:
@@ -447,7 +422,6 @@ def main():
                         time.sleep(5)
                         continue
 
-                # Xử lý kết quả
                 if success and regions:
                     check_and_ping(regions, prev_state)
                     prev_state = regions
@@ -459,7 +433,6 @@ def main():
                     fail_streak += 1
                     print(f"❌ Fail lần {fail_streak} [{vn_now.strftime('%H:%M')}]")
                     
-                    # Panic restart
                     if fail_streak >= FAIL_RESTART_THRESHOLD:
                         print(f"🛠️ FAIL STREAK {fail_streak} -> PANIC RESTART")
                         browser.close()
@@ -470,7 +443,6 @@ def main():
                     if fail_streak == FAIL_ALERT_THRESHOLD:
                         send_alert(f"⚠️ Bot fail {fail_streak} lần liên tiếp!")
 
-                # Push embed & save
                 msg_id = push_embed(last_regions, msg_id)
                 save_state(msg_id, last_regions)
                 print(f"🕐 Footer: {vn_now.strftime('%H:%M:%S')} (Restart: {restart_count})")
