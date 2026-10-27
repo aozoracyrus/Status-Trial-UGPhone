@@ -23,7 +23,7 @@ jobs:
         python-version: '3.11'
         cache: 'pip'
 
-    - name: Install Chrome & Dependencies (FIXED)
+    - name: Install Chrome & Dependencies (Ubuntu 24.04 Compatible)
       run: |
         sudo apt-get update
         sudo apt-get install -y \
@@ -43,7 +43,7 @@ jobs:
           libxdg-basedir1 \
           libxkbcommon0 \
           libxrandr2 \
-          libasound2 \
+          libasound2t64 \
           libatspi2.0-0
 
     - name: Install Python Packages
@@ -85,7 +85,6 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.PAT }}
 
-    # ✅ FIX: Luôn trigger job tiếp theo dù job hiện tại fail
     - name: Trigger Next Runner
       if: always()
       run: |
