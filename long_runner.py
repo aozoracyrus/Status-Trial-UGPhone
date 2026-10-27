@@ -13,37 +13,48 @@ import pytz
 # CẤU HÌNH
 # =====================================================================
 TARGET_URL = "https://hanaminikata.com/tools/buydevice_ugphone"
-FALLBACK_URL = "https://hanaminikata.com/tc"
 WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL')
 ROLE_PING_ID = os.environ.get('ROLE_PING_ID')
-COOKIES_FILE = "cookies.json"
 
 DURATION_MINUTES = 345
 PING_AUTO_DELETE = 300
-FAIL_RESTART_THRESHOLD = 3
+
+# ✅ Theo yêu cầu: chờ đủ lâu cho Xvfb + Turnstile tự verify
+WAIT_AFTER_GOTO_MS = 12000      # 12s sau goto (anh yêu cầu 10-15s)
+WAIT_UI_TIMEOUT_MS = 15000      # tối đa 15s đợi text 'Tạo máy UGPhone'
+UI_MARKER_TEXT = "Tạo máy UGPhone"   # dấu hiệu UI THẬT đã load
+
+# ✅ KHÔNG panic restart. fail_streak CHỈ dùng để alert Discord.
 FAIL_ALERT_THRESHOLD = 10
-MAX_RETRY_PER_CHECK = 3
+
+# ✅ Chỉ mở lại browser khi CHẾT THẬT, có cooldown + giới hạn
+MAX_BROWSER_REOPEN = 3
+REOPEN_COOLDOWN_S = 60          # chờ IP "nguội" trước khi mở lại
 
 DATA_DIR = "data"
+DEBUG_DIR = os.path.join(DATA_DIR, "debug")
 MSG_ID_FILE = os.path.join(DATA_DIR, "message_id.txt")
 PREV_STATE_FILE = os.path.join(DATA_DIR, "prev_state.json")
+DEBUG_SHOT = os.path.join(DEBUG_DIR, "last_error.png")
 
 REGIONS = {
     'SG': {'name': 'Singapore', 'flag': '🇸'},
-    'HK': {'name': 'Hong Kong', 'flag': '🇭🇰'},
+    'HK': {'name': 'Hong Kong', 'flag': '🇭'},
     'JP': {'name': 'Japan', 'flag': '🇯🇵'},
     'DE': {'name': 'Germany', 'flag': '🇩🇪'},
     'US': {'name': 'America', 'flag': '🇺🇸'}
 }
 
-tz_vn = pytz.timezone('Asia/Ho_Chi_Minh')
+VIEWPORT = {'width': 1920, 'height': 1080}   # ✅ đồng bộ Xvfb
 
+tz_vn = pytz.timezone('Asia/Ho_Chi_Minh')
 def get_time_24h():
     return datetime.now(tz_vn).strftime("%H:%M ngày %d/%m/%Y")
 
-def ensure_data_dir():
-    if not os.path.exists(DATA_DIR):
-        os.makedirs(DATA_DIR)
+def ensure_dirs():
+    for d in (DATA_DIR, DEBUG_DIR):
+        if not os.path.exists(d):
+            os.makedirs(d)
 
 def ensure_camoufox_installed():
     try:
@@ -54,144 +65,14 @@ def ensure_camoufox_installed():
         return False
 
 # =====================================================================
-# ✅ FIX RACE CONDITION: HELPER RETRY-SAFE (navigation vs chet that)
-# =====================================================================
-NAV_KEYWORDS = (
-    'execution context was destroyed', 'navigation',
-    'target closed', 'target page, context or browser',
-    'net::err', 'err_network', 'navigating'
-)
-
-def _is_nav_err(e):
-    m = str(e).lower()
-    return any(k in m for k in NAV_KEYWORDS)
-
-def _safe_eval(page, script):
-    """evaluate co retry. Tra None neu van dang navigate sau 4 lan (khong crash)."""
-    for _ in range(4):
-        try:
-            return page.evaluate(script)
-        except Exception as e:
-            if _is_nav_err(e):
-                try:
-                    page.wait_for_load_state("load", timeout=5000)
-                except Exception:
-                    pass
-                time.sleep(1.2)
-                continue
-            raise
-    return None
-
-def _safe_content(page):
-    """content() co retry. Tra '' neu van dang navigate (browser van SON)."""
-    for _ in range(4):
-        try:
-            return page.content()
-        except Exception as e:
-            if _is_nav_err(e):
-                try:
-                    page.wait_for_load_state("load", timeout=5000)
-                except Exception:
-                    pass
-                time.sleep(1.2)
-                continue
-            raise
-    return ""
-
-# =====================================================================
-# COOKIES (du phong)
-# =====================================================================
-def load_hanami_cookies():
-    cookies_data = None
-    env_cookies = os.environ.get('HANAMI_COOKIES')
-    if env_cookies:
-        try:
-            cookies_data = json.loads(env_cookies)
-            print("🍪 Đã load cookies từ GitHub Secret")
-        except Exception as e:
-            print(f"⚠️ Lỗi parse HANAMI_COOKIES: {e}")
-    if cookies_data is None and os.path.exists(COOKIES_FILE):
-        try:
-            with open(COOKIES_FILE, 'r') as f:
-                cookies_data = json.load(f)
-            print(f"🍪 Đã load cookies từ file {COOKIES_FILE}")
-        except Exception as e:
-            print(f"⚠️ Lỗi đọc file cookies: {e}")
-    if not cookies_data:
-        return []
-    hanami_cookies = []
-    for cookie in cookies_data:
-        domain = cookie.get('domain', '')
-        name = cookie.get('name', '')
-        if 'hanaminikata.com' in domain and name != 'cf_clearance':
-            hanami_cookies.append(cookie)
-    print(f"✅ Chuẩn bị {len(hanami_cookies)} cookies Hanami (dự phòng)")
-    return hanami_cookies
-
-def inject_cookies(page, cookies):
-    if not cookies:
-        return False
-    try:
-        formatted = []
-        for c in cookies:
-            formatted.append({
-                'name': c['name'],
-                'value': c['value'],
-                'domain': c.get('domain', '.hanaminikata.com'),
-                'path': c.get('path', '/'),
-                'expires': c.get('expires', -1),
-                'secure': c.get('secure', True),
-                'httpOnly': c.get('httpOnly', False),
-                'sameSite': c.get('sameSite', 'Lax')
-            })
-        page.context.add_cookies(formatted)
-        print(f"✅ Đã inject {len(formatted)} cookies")
-        return True
-    except Exception as e:
-        print(f"⚠️ Lỗi inject cookies: {e}")
-        return False
-
-# =====================================================================
-# ANTI-DEBUG / CHAN REDIRECT VE TRANG CHU
-# =====================================================================
-ANTI_DEBUG_BYPASS = """
-(function() {
-    const origReplace = window.location.replace;
-    const origAssign = window.location.assign;
-    const allow = (u) => !u || u.includes('buydevice') || u.includes('/tc');
-    window.location.replace = function(url) {
-        if (!allow(url)) { console.log('[BOT] Chan replace:', url); return; }
-        return origReplace.call(window.location, url);
-    };
-    window.location.assign = function(url) {
-        if (!allow(url)) { console.log('[BOT] Chan assign:', url); return; }
-        return origAssign.call(window.location, url);
-    };
-    const origPush = history.pushState;
-    const origRep = history.replaceState;
-    history.pushState = function() {
-        if (!allow(arguments[2])) { console.log('[BOT] Chan pushState:', arguments[2]); return; }
-        return origPush.apply(history, arguments);
-    };
-    history.replaceState = function() {
-        if (!allow(arguments[2])) { console.log('[BOT] Chan replaceState:', arguments[2]); return; }
-        return origRep.apply(history, arguments);
-    };
-    console.log('[BOT] Anti-debug + chan redirect ON');
-})();
-"""
-
-CHECK_URL_SCRIPT = "() => window.location.href"
-
-# =====================================================================
-# PARSE CHAM MAU
+# PARSE CHẤM MÀU (giữ nguyên, đã ổn định)
 # =====================================================================
 def _stock_of_text(t):
     low = t.lower()
     if 'có máy' in low or 'đang còn máy' in low: return True
     if 'hết máy' in low: return False
-    if '' in t: return True
-    if any(k in t for k in ['🔴', '🟥', '🟠', '', '']): return False
+    if '🟢' in t: return True
+    if any(k in t for k in ['🔴', '🟥', '🟠', '⚪']): return False
     return None
 
 def parse_regions_from_text(text):
@@ -222,7 +103,7 @@ def regions_complete(regions):
     return regions is not None and all(v is not None for v in regions.values())
 
 # =====================================================================
-# JS CLICK DROPDOWN + DOC OPTIONS
+# JS
 # =====================================================================
 JS_FIND_AND_CLICK = """() => {
   let el = document.querySelector('select');
@@ -251,115 +132,118 @@ JS_READ_OPTIONS = """() => {
 }"""
 
 # =====================================================================
-# BROWSER CLASS - HEADLESS=FALSE + RETRY-SAFE
+# BROWSER - HEADFUL, VIEWPORT CHUẨN, KIÊN NHẪN, KHÔNG PANIC
 # =====================================================================
-class ProtectedBotBrowser:
-    def __init__(self, cookies=None):
+DEAD_MARKERS = (
+    'target closed', 'target page, context or browser',
+    'browser has been closed', 'no such window', 'connection refused',
+    'httpconnectionpool', 'net::err_connection'
+)
+
+def _is_really_dead(e):
+    m = str(e).lower()
+    return any(k in m for k in DEAD_MARKERS)
+
+class PatientBrowser:
+    def __init__(self):
         if not ensure_camoufox_installed():
             raise Exception("Camoufox chưa cài")
         from camoufox.sync_api import Camoufox
-        self.cm = Camoufox(
-            headless=False,
-            humanize=True,
-            block_images=False
-        )
+        # ✅ headful + humanize, KHÔNG chặn ảnh (giống người thật)
+        self.cm = Camoufox(headless=False, humanize=True, block_images=False)
         self.browser = self.cm.__enter__()
-        self.page = self.browser.new_page()
-        self.name = "Camoufox-Headed"
-        self.last_url = None
-        if cookies:
-            inject_cookies(self.page, cookies)
-        print(f"✅ Browser {self.name} đã khởi động (HEADED + humanize)")
-
-    def goto_with_protection(self, url):
+        # ✅ viewport 1920x1080 đồng bộ Xvfb để toạ độ Turnstile chính xác
+        self.page = self.browser.new_page(viewport=VIEWPORT)
         try:
-            # FIX: wait_until="load" + networkidle ngan -> giam cua so navigate
-            self.page.goto(url, wait_until="load", timeout=45000)
-            try:
-                self.page.wait_for_load_state("networkidle", timeout=6000)
-            except Exception:
-                pass
-            time.sleep(2)
-            _safe_eval(self.page, ANTI_DEBUG_BYPASS)
-            print("🛡️ Anti-debug + chan redirect injected")
-            self.last_url = url
-            return True
+            self.page.set_viewport_size(VIEWPORT)
+        except Exception:
+            pass
+        self.page.set_default_timeout(30000)
+        self.name = "Camoufox-Headful"
+        print(f"✅ Browser {self.name} đã khởi động (viewport {VIEWPORT['width']}x{VIEWPORT['height']})")
+
+    def load_and_wait(self, url):
+        """goto + chờ đủ lâu cho Xvfb render + Turnstile tự verify."""
+        self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        self.page.wait_for_timeout(WAIT_AFTER_GOTO_MS)   # ✅ 12s kiên nhẫn
+
+    def try_click_turnstile(self):
+        """Best-effort click vùng Turnstile (null-safe, KHÔNG fail nếu không có)."""
+        try:
+            el = self.page.query_selector(
+                'iframe[src*="challenges.cloudflare.com"], iframe[title*="Cloudflare"]'
+            )
+            if el:
+                box = el.bounding_box()
+                if box:
+                    self.page.mouse.click(
+                        box['x'] + box['width'] / 2,
+                        box['y'] + box['height'] / 2
+                    )
+                    print("🖱️ Đã click vào vùng Turnstile (best-effort)")
+                    self.page.wait_for_timeout(3000)
+                    return True
         except Exception as e:
-            print(f"❌ Lỗi goto: {e}")
-            return False
+            print(f"⚠️ try_click_turnstile bỏ qua: {e}")
+        return False
 
-    def check_and_fix_url(self):
-        # FIX: _safe_eval tra None khi dang navigate -> bo qua, KHONG ep goto (tranh loop)
-        cur = _safe_eval(self.page, CHECK_URL_SCRIPT)
-        if cur is None:
-            return True
-        if not ('buydevice' in cur or '/tc' in cur):
-            print(f"⚠️ Bị redirect về: {cur[:80]}... Ép về trang đích!")
-            return self.goto_with_protection(TARGET_URL)
-        return True
-
-    def is_alive(self):
-        # FIX: navigation != chet. _safe_content tra '' khi navigate -> van True.
-        # Chi raise (-> False) khi chet that (target closed).
+    def wait_for_real_ui(self):
+        """✅ CHỈ đợi text 'Tạo máy UGPhone' = UI thật đã load. Trả bool, KHÔNG raise."""
         try:
-            _safe_content(self.page)
+            self.page.get_by_text(UI_MARKER_TEXT, exact=False).first.wait_for(
+                state="visible", timeout=WAIT_UI_TIMEOUT_MS
+            )
             return True
         except Exception:
             return False
 
     def click_dropdown(self):
-        return _safe_eval(self.page, JS_FIND_AND_CLICK)
+        try:
+            return self.page.evaluate(JS_FIND_AND_CLICK)
+        except Exception as e:
+            if _is_really_dead(e):
+                raise
+            return None
 
     def read_options(self):
-        return _safe_eval(self.page, JS_READ_OPTIONS)
+        try:
+            return self.page.evaluate(JS_READ_OPTIONS)
+        except Exception as e:
+            if _is_really_dead(e):
+                raise
+            return None
 
-    def get_html(self):
-        self.check_and_fix_url()
-        return _safe_content(self.page)
+    def screenshot_debug(self):
+        """✅ Lỗi thì chụp ảnh, KHÔNG restart."""
+        try:
+            ensure_dirs()
+            self.page.screenshot(path=DEBUG_SHOT, full_page=True)
+            print(f"📸 Đã chụp debug -> {DEBUG_SHOT}")
+        except Exception as e:
+            print(f"⚠️ Chụp debug thất bại: {e}")
+
+    def is_really_alive(self):
+        try:
+            _ = self.page.title()
+            return True
+        except Exception as e:
+            return not _is_really_dead(e)   # navigation != chết
 
     def close(self):
         try: self.cm.__exit__(None, None, None)
         except Exception: pass
 
-def create_protected_browser(cookies=None):
-    for attempt in range(3):
-        try:
-            b = ProtectedBotBrowser(cookies=cookies)
-            if b.goto_with_protection(TARGET_URL):
-                time.sleep(3)
-                return b
-        except Exception as e:
-            print(f"❌ Lỗi tạo browser lần {attempt+1}: {e}")
-            time.sleep(5)
-    return None
+def open_browser():
+    try:
+        b = PatientBrowser()
+        b.load_and_wait(TARGET_URL)
+        return b
+    except Exception as e:
+        print(f"❌ Mở browser lỗi: {e}")
+        return None
 
 # =====================================================================
-# WAIT CLOUDFLARE
-# =====================================================================
-def wait_cloudflare(browser, timeout=90):
-    start = time.time()
-    last_log = 0
-    while time.time() - start < timeout:
-        try:
-            html = browser.get_html()
-        except Exception:
-            time.sleep(3)
-            continue
-        if "just a moment" not in html.lower():
-            elapsed = int(time.time() - start)
-            if elapsed > 5:
-                print(f"✅ Đã qua Cloudflare sau {elapsed}s")
-            return True
-        now = time.time()
-        if now - last_log >= 15:
-            print(f"⏳ Đang chờ Cloudflare xác minh... (đã chờ {int(now-start)}s)")
-            last_log = now
-        time.sleep(5)
-    print(f"❌ Timeout: Cloudflare không qua sau {timeout}s")
-    return False
-
-# =====================================================================
-# DISCORD & STATE
+# DISCORD & STATE (giữ nguyên)
 # =====================================================================
 def load_state():
     msg_id, prev_state = None, {}
@@ -371,7 +255,7 @@ def load_state():
     return msg_id, prev_state
 
 def save_state(msg_id, regions):
-    ensure_data_dir()
+    ensure_dirs()
     open(MSG_ID_FILE, 'w').write(str(msg_id))
     json.dump(regions, open(PREV_STATE_FILE, 'w'))
 
@@ -423,26 +307,24 @@ def check_and_ping(regions, prev_state):
         except Exception: pass
 
 # =====================================================================
-# MAIN LOOP
+# MAIN LOOP - KIÊN NHẪN, KHÔNG PANIC, GIỮ cf_clearance
 # =====================================================================
 def main():
-    print(f"🏁 Bắt đầu bot (HEADED + humanize + retry-safe navigation)")
+    print(f"🏁 Bắt đầu bot (HEADFUL + kiên nhẫn, KHÔNG login-wall check, KHÔNG panic restart)")
     print(f"   Target: {TARGET_URL}")
+    print(f"   Chờ sau goto: {WAIT_AFTER_GOTO_MS}ms | Đợi UI: {WAIT_UI_TIMEOUT_MS}ms | Viewport: {VIEWPORT}")
 
-    hanami_cookies = load_hanami_cookies()
+    ensure_dirs()
     msg_id, prev_state = load_state()
     last_regions = prev_state if prev_state else {c: False for c in REGIONS}
 
-    browser = create_protected_browser(cookies=hanami_cookies)
+    browser = open_browser()
     if not browser:
-        print("❌ Không thể khởi động browser. Kết thúc.")
+        print("❌ Không mở được browser lần đầu. Kết thúc job (relay job sau sẽ thử).")
         return
 
-    if not wait_cloudflare(browser, timeout=120):
-        print("⚠️ Cloudflare chưa qua lần đầu, sẽ thử lại trong loop")
-
     fail_streak = 0
-    restart_count = 0
+    reopen_count = 0
     last_minute_key = None
     start_time = time.time()
 
@@ -450,101 +332,103 @@ def main():
         while (time.time() - start_time) / 60 < DURATION_MINUTES:
             vn_now = datetime.now(tz_vn)
             minute_key = (vn_now.day, vn_now.hour, vn_now.minute)
+            if minute_key == last_minute_key:
+                time.sleep(0.5)
+                continue
+            last_minute_key = minute_key
 
-            if minute_key != last_minute_key:
-                last_minute_key = minute_key
-                regions = None
-                via = "NONE"
-                success = False
+            regions = None
+            via = "NONE"
+            soft_fail = False   # ✅ lỗi "mềm": UI chưa load / parse thiếu -> KHÔNG restart
 
-                for retry in range(MAX_RETRY_PER_CHECK):
-                    try:
-                        if not browser.is_alive():
-                            print("💀 Browser chết. Đang tạo mới...")
-                            browser.close()
-                            browser = create_protected_browser(cookies=hanami_cookies)
-                            restart_count += 1
-                            if not browser: break
-                            if not wait_cloudflare(browser, timeout=90):
-                                continue
+            try:
+                # Reload NHẸ trên cùng browser (giữ cf_clearance tích luỹ)
+                browser.load_and_wait(TARGET_URL)
+                browser.try_click_turnstile()
 
-                        if not browser.check_and_fix_url():
-                            browser.goto_with_protection(TARGET_URL)
-                            time.sleep(3)
-
-                        html = browser.get_html()
-
-                        if 'just a moment' in html.lower():
-                            print("🛡️ Cloudflare detected. Đang đợi...")
-                            if not wait_cloudflare(browser, timeout=60):
-                                browser.goto_with_protection(TARGET_URL)
-                                if not wait_cloudflare(browser, timeout=60):
-                                    continue
-                            html = browser.get_html()
-
-                        if 'login' in html.lower() and 'token' in html.lower():
-                            print("🔐 Vẫn bị login wall dù headed -> fingerprint sâu (TLS/JA3)")
-                            break
-
-                        click_res = browser.click_dropdown()
-                        if not click_res or not click_res.get('found'):
-                            print(f"⚠️ Không thấy dropdown (lần {retry+1}/{MAX_RETRY_PER_CHECK})")
-                            time.sleep(5)
-                            browser.goto_with_protection(TARGET_URL)
-                            time.sleep(3)
-                            continue
-
-                        time.sleep(2)
-                        options = browser.read_options()
-
-                        if options and len(options) > 10:
-                            regions = parse_regions_from_text(options)
-                            if regions_complete(regions):
-                                via = "DROPDOWN"
-                                success = True
-                                break
-                            else:
-                                print(f"⚠️ Parse thiếu data (lần {retry+1})")
-                        else:
-                            print(f"⚠️ Không đọc được options (lần {retry+1})")
-                        time.sleep(5)
-
-                    except Exception as e:
-                        print(f"❌ Lỗi retry {retry+1}: {e}")
-                        time.sleep(5)
-                        continue
-
-                if success and regions:
-                    check_and_ping(regions, prev_state)
-                    prev_state = regions
-                    last_regions = regions
-                    fail_streak = 0
-                    ket_qua = ", ".join(f"{c}: {bool(regions.get(c))}" for c in ['SG','HK','JP','DE','US'])
-                    print(f"✅ Check [{vn_now.strftime('%H:%M')}] ({via}): {ket_qua}")
+                # ✅ CHỈ đợi UI thật. Không check login, không check 'just a moment'.
+                if not browser.wait_for_real_ui():
+                    print(f"⏳ [{vn_now.strftime('%H:%M')}] UI '{UI_MARKER_TEXT}' chưa hiện "
+                          f"(Xvfb chậm / Turnstile đang verify) -> giữ browser, thử lại phút sau. KHÔNG restart.")
+                    browser.screenshot_debug()
+                    soft_fail = True
                 else:
-                    fail_streak += 1
-                    print(f"❌ Fail lần {fail_streak} [{vn_now.strftime('%H:%M')}]")
-                    if fail_streak >= FAIL_RESTART_THRESHOLD:
-                        print(f"🛠️ FAIL STREAK {fail_streak} -> PANIC RESTART")
-                        browser.close()
-                        browser = create_protected_browser(cookies=hanami_cookies)
-                        restart_count += 1
-                        fail_streak = 0
-                        if browser and not wait_cloudflare(browser, timeout=90):
-                            print("❌ Cloudflare không qua sau panic restart")
-                    if fail_streak == FAIL_ALERT_THRESHOLD:
-                        send_alert(f"⚠️ Bot fail {fail_streak} lần liên tiếp!")
+                    click_res = browser.click_dropdown()
+                    if not click_res or not click_res.get('found'):
+                        print(f"⚠️ [{vn_now.strftime('%H:%M')}] Không thấy dropdown -> chụp debug, KHÔNG restart.")
+                        browser.screenshot_debug()
+                        soft_fail = True
+                    else:
+                        browser.page.wait_for_timeout(2000)
+                        options = browser.read_options()
+                        if options and len(options) > 10:
+                            parsed = parse_regions_from_text(options)
+                            if regions_complete(parsed):
+                                regions = parsed
+                                via = "DROPDOWN"
+                            else:
+                                print(f"⚠️ [{vn_now.strftime('%H:%M')}] Parse thiếu region -> chụp debug, KHÔNG restart.")
+                                browser.screenshot_debug()
+                                soft_fail = True
+                        else:
+                            print(f"⚠️ [{vn_now.strftime('%H:%M')}] Không đọc được options -> chụp debug, KHÔNG restart.")
+                            browser.screenshot_debug()
+                            soft_fail = True
 
-                msg_id = push_embed(last_regions, msg_id)
-                save_state(msg_id, last_regions)
-                print(f"🕐 Footer: {vn_now.strftime('%H:%M:%S')} (Restart: {restart_count})")
+            except Exception as e:
+                if _is_really_dead(e):
+                    # ✅ Browser CHẾT THẬT -> mới mở lại, có cooldown + giới hạn
+                    print(f"💀 Browser chết thật: {str(e)[:80]}...")
+                    try: browser.close()
+                    except Exception: pass
+                    reopen_count += 1
+                    if reopen_count > MAX_BROWSER_REOPEN:
+                        print(f"🛑 Đã mở lại {reopen_count} lần (quá giới hạn {MAX_BROWSER_REOPEN}). "
+                              f"Kết thúc job êm để relay job sau tiếp (IP đã nguội).")
+                        break
+                    print(f"⏳ Cooldown {REOPEN_COOLDOWN_S}s cho IP nguội trước khi mở lại...")
+                    time.sleep(REOPEN_COOLDOWN_S)
+                    browser = open_browser()
+                    if not browser:
+                        print("❌ Mở lại thất bại. Kết thúc job êm.")
+                        break
+                    soft_fail = True
+                else:
+                    # Exception lạ (không phải chết) -> coi như soft fail, KHÔNG restart
+                    print(f"⚠️ Lỗi mềm: {e} -> chụp debug, giữ browser, KHÔNG restart.")
+                    try: browser.screenshot_debug()
+                    except Exception: pass
+                    soft_fail = True
+
+            # ✅ Xử lý kết quả: soft_fail CHỈ tăng streak để alert, KHÔNG đụng browser
+            if regions is not None:
+                check_and_ping(regions, prev_state)
+                prev_state = regions
+                last_regions = regions
+                fail_streak = 0
+                ket_qua = ", ".join(f"{c}: {bool(regions.get(c))}" for c in ['SG','HK','JP','DE','US'])
+                print(f"✅ Check [{vn_now.strftime('%H:%M')}] ({via}): {ket_qua}")
+            else:
+                fail_streak += 1
+                print(f"❌ Fail lần {fail_streak} [{vn_now.strftime('%H:%M')}] "
+                      f"({'soft - giữ browser' if soft_fail else 'unknown'})")
+                if fail_streak == FAIL_ALERT_THRESHOLD or (fail_streak > FAIL_ALERT_THRESHOLD and fail_streak % 60 == 0):
+                    send_alert(f"⚠️ Bot UGPhone không đọc được stock {fail_streak} phút liên tiếp "
+                               f"(đã chụp debug/data/last_error.png). KHÔNG panic restart - đang kiên nhẫn chờ.")
+
+            msg_id = push_embed(last_regions, msg_id)
+            save_state(msg_id, last_regions)
+            print(f"🕐 Footer: {vn_now.strftime('%H:%M:%S')} (reopen thật: {reopen_count})")
 
             time.sleep(0.5)
 
     except KeyboardInterrupt:
         print("🛑 Dừng bot.")
     finally:
-        if browser: browser.close()
+        if browser:
+            try: browser.close()
+            except Exception: pass
+        print(f"⏰ Kết thúc job. (browser mở lại thật: {reopen_count} lần)")
 
 if __name__ == "__main__":
     main()
