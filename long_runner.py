@@ -29,7 +29,7 @@ MSG_ID_FILE = os.path.join(DATA_DIR, "message_id.txt")
 PREV_STATE_FILE = os.path.join(DATA_DIR, "prev_state.json")
 
 REGIONS = {
-    'SG': {'name': 'Singapore', 'flag': '🇸🇬'},
+    'SG': {'name': 'Singapore', 'flag': '🇸'},
     'HK': {'name': 'Hong Kong', 'flag': '🇭🇰'},
     'JP': {'name': 'Japan', 'flag': '🇯🇵'},
     'DE': {'name': 'Germany', 'flag': '🇩🇪'},
@@ -54,7 +54,52 @@ def ensure_camoufox_installed():
         return False
 
 # =====================================================================
-# COOKIES (optional - Chrome khong login van vao duoc nen day chi du phong)
+# ✅ FIX RACE CONDITION: HELPER RETRY-SAFE (navigation vs chet that)
+# =====================================================================
+NAV_KEYWORDS = (
+    'execution context was destroyed', 'navigation',
+    'target closed', 'target page, context or browser',
+    'net::err', 'err_network', 'navigating'
+)
+
+def _is_nav_err(e):
+    m = str(e).lower()
+    return any(k in m for k in NAV_KEYWORDS)
+
+def _safe_eval(page, script):
+    """evaluate co retry. Tra None neu van dang navigate sau 4 lan (khong crash)."""
+    for _ in range(4):
+        try:
+            return page.evaluate(script)
+        except Exception as e:
+            if _is_nav_err(e):
+                try:
+                    page.wait_for_load_state("load", timeout=5000)
+                except Exception:
+                    pass
+                time.sleep(1.2)
+                continue
+            raise
+    return None
+
+def _safe_content(page):
+    """content() co retry. Tra '' neu van dang navigate (browser van SON)."""
+    for _ in range(4):
+        try:
+            return page.content()
+        except Exception as e:
+            if _is_nav_err(e):
+                try:
+                    page.wait_for_load_state("load", timeout=5000)
+                except Exception:
+                    pass
+                time.sleep(1.2)
+                continue
+            raise
+    return ""
+
+# =====================================================================
+# COOKIES (du phong)
 # =====================================================================
 def load_hanami_cookies():
     cookies_data = None
@@ -206,14 +251,13 @@ JS_READ_OPTIONS = """() => {
 }"""
 
 # =====================================================================
-# BROWSER CLASS - FIX: HEADLESS=FALSE + HUMANIZE
+# BROWSER CLASS - HEADLESS=FALSE + RETRY-SAFE
 # =====================================================================
 class ProtectedBotBrowser:
     def __init__(self, cookies=None):
         if not ensure_camoufox_installed():
             raise Exception("Camoufox chưa cài")
         from camoufox.sync_api import Camoufox
-        # FIX CHINH: headless=False de giong Chrome/Quetta that, kh lo webdriver
         self.cm = Camoufox(
             headless=False,
             humanize=True,
@@ -229,13 +273,15 @@ class ProtectedBotBrowser:
 
     def goto_with_protection(self, url):
         try:
-            self.page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            time.sleep(3)
+            # FIX: wait_until="load" + networkidle ngan -> giam cua so navigate
+            self.page.goto(url, wait_until="load", timeout=45000)
             try:
-                self.page.evaluate(ANTI_DEBUG_BYPASS)
-                print("🛡️ Anti-debug + chan redirect injected")
-            except Exception as e:
-                print(f"⚠️ Không inject được anti-debug: {e}")
+                self.page.wait_for_load_state("networkidle", timeout=6000)
+            except Exception:
+                pass
+            time.sleep(2)
+            _safe_eval(self.page, ANTI_DEBUG_BYPASS)
+            print("🛡️ Anti-debug + chan redirect injected")
             self.last_url = url
             return True
         except Exception as e:
@@ -243,32 +289,33 @@ class ProtectedBotBrowser:
             return False
 
     def check_and_fix_url(self):
-        try:
-            cur = self.page.evaluate(CHECK_URL_SCRIPT)
-            if cur and not ('buydevice' in cur or '/tc' in cur):
-                print(f"⚠️ Bị redirect về: {cur[:80]}... Ép về trang đích!")
-                return self.goto_with_protection(TARGET_URL)
+        # FIX: _safe_eval tra None khi dang navigate -> bo qua, KHONG ep goto (tranh loop)
+        cur = _safe_eval(self.page, CHECK_URL_SCRIPT)
+        if cur is None:
             return True
-        except Exception as e:
-            print(f"❌ Lỗi check URL: {e}")
-            return False
+        if not ('buydevice' in cur or '/tc' in cur):
+            print(f"⚠️ Bị redirect về: {cur[:80]}... Ép về trang đích!")
+            return self.goto_with_protection(TARGET_URL)
+        return True
 
     def is_alive(self):
+        # FIX: navigation != chet. _safe_content tra '' khi navigate -> van True.
+        # Chi raise (-> False) khi chet that (target closed).
         try:
-            _ = self.page.content()
+            _safe_content(self.page)
             return True
         except Exception:
             return False
 
     def click_dropdown(self):
-        return self.page.evaluate(JS_FIND_AND_CLICK)
+        return _safe_eval(self.page, JS_FIND_AND_CLICK)
 
     def read_options(self):
-        return self.page.evaluate(JS_READ_OPTIONS)
+        return _safe_eval(self.page, JS_READ_OPTIONS)
 
     def get_html(self):
         self.check_and_fix_url()
-        return self.page.content()
+        return _safe_content(self.page)
 
     def close(self):
         try: self.cm.__exit__(None, None, None)
@@ -279,7 +326,7 @@ def create_protected_browser(cookies=None):
         try:
             b = ProtectedBotBrowser(cookies=cookies)
             if b.goto_with_protection(TARGET_URL):
-                time.sleep(5)
+                time.sleep(3)
                 return b
         except Exception as e:
             print(f"❌ Lỗi tạo browser lần {attempt+1}: {e}")
@@ -379,7 +426,7 @@ def check_and_ping(regions, prev_state):
 # MAIN LOOP
 # =====================================================================
 def main():
-    print(f"🏁 Bắt đầu bot (HEADED + humanize - fix fingerprint)")
+    print(f"🏁 Bắt đầu bot (HEADED + humanize + retry-safe navigation)")
     print(f"   Target: {TARGET_URL}")
 
     hanami_cookies = load_hanami_cookies()
@@ -436,7 +483,7 @@ def main():
                             html = browser.get_html()
 
                         if 'login' in html.lower() and 'token' in html.lower():
-                            print("🔐 Vẫn bị login wall dù headed -> fingerprint sâu hơn (TLS/JA3)")
+                            print("🔐 Vẫn bị login wall dù headed -> fingerprint sâu (TLS/JA3)")
                             break
 
                         click_res = browser.click_dropdown()
