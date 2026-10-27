@@ -38,8 +38,8 @@ PREV_STATE_FILE = os.path.join(DATA_DIR, "prev_state.json")
 DEBUG_SHOT = os.path.join(DEBUG_DIR, "last_error.png")
 
 REGIONS = {
-    'SG': {'name': 'Singapore', 'flag': '🇸'},
-    'HK': {'name': 'Hong Kong', 'flag': '🇭'},
+    'SG': {'name': 'Singapore', 'flag': '🇸🇬'},
+    'HK': {'name': 'Hong Kong', 'flag': '🇭🇰'},
     'JP': {'name': 'Japan', 'flag': '🇯🇵'},
     'DE': {'name': 'Germany', 'flag': '🇩🇪'},
     'US': {'name': 'America', 'flag': '🇺🇸'}
