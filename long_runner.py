@@ -16,6 +16,7 @@ TARGET_URL = "https://hanaminikata.com/tools/buydevice_ugphone"
 FALLBACK_URL = "https://hanaminikata.com/tc"
 WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL')
 ROLE_PING_ID = os.environ.get('ROLE_PING_ID')
+COOKIES_FILE = "cookies.json"
 
 DURATION_MINUTES = 345
 PING_AUTO_DELETE = 300
@@ -47,83 +48,105 @@ def ensure_data_dir():
 def ensure_camoufox_installed():
     try:
         r = subprocess.run(['python', '-m', 'camoufox', 'fetch'],
-                           capture_output=True, text=True, timeout=120)
+                           capture_output=True, text=True, timeout=180)
         return r.returncode == 0
     except Exception:
         return False
 
 # =====================================================================
-# 🛡️ SCRIPT CHỐNG ANTI-CONSOLE & REDIRECT
+# COOKIES (optional - Chrome khong login van vao duoc nen day chi du phong)
+# =====================================================================
+def load_hanami_cookies():
+    cookies_data = None
+    env_cookies = os.environ.get('HANAMI_COOKIES')
+    if env_cookies:
+        try:
+            cookies_data = json.loads(env_cookies)
+            print("🍪 Đã load cookies từ GitHub Secret")
+        except Exception as e:
+            print(f"⚠️ Lỗi parse HANAMI_COOKIES: {e}")
+    if cookies_data is None and os.path.exists(COOKIES_FILE):
+        try:
+            with open(COOKIES_FILE, 'r') as f:
+                cookies_data = json.load(f)
+            print(f"🍪 Đã load cookies từ file {COOKIES_FILE}")
+        except Exception as e:
+            print(f"⚠️ Lỗi đọc file cookies: {e}")
+    if not cookies_data:
+        return []
+    hanami_cookies = []
+    for cookie in cookies_data:
+        domain = cookie.get('domain', '')
+        name = cookie.get('name', '')
+        if 'hanaminikata.com' in domain and name != 'cf_clearance':
+            hanami_cookies.append(cookie)
+    print(f"✅ Chuẩn bị {len(hanami_cookies)} cookies Hanami (dự phòng)")
+    return hanami_cookies
+
+def inject_cookies(page, cookies):
+    if not cookies:
+        return False
+    try:
+        formatted = []
+        for c in cookies:
+            formatted.append({
+                'name': c['name'],
+                'value': c['value'],
+                'domain': c.get('domain', '.hanaminikata.com'),
+                'path': c.get('path', '/'),
+                'expires': c.get('expires', -1),
+                'secure': c.get('secure', True),
+                'httpOnly': c.get('httpOnly', False),
+                'sameSite': c.get('sameSite', 'Lax')
+            })
+        page.context.add_cookies(formatted)
+        print(f"✅ Đã inject {len(formatted)} cookies")
+        return True
+    except Exception as e:
+        print(f"⚠️ Lỗi inject cookies: {e}")
+        return False
+
+# =====================================================================
+# ANTI-DEBUG / CHAN REDIRECT VE TRANG CHU
 # =====================================================================
 ANTI_DEBUG_BYPASS = """
 (function() {
-    const originalDebugger = Function.prototype.constructor;
-    Function.prototype.constructor = function(code) {
-        if (code === 'debugger') return function() {};
-        return originalDebugger.apply(this, arguments);
-    };
-
-    const originalToString = Function.prototype.toString;
-    Function.prototype.toString = function() {
-        if (this === console || this === window.console) {
-            return 'function console() { [native code] }';
-        }
-        return originalToString.apply(this, arguments);
-    };
-
-    const originalReplace = window.location.replace;
-    const originalAssign = window.location.assign;
+    const origReplace = window.location.replace;
+    const origAssign = window.location.assign;
+    const allow = (u) => !u || u.includes('buydevice') || u.includes('/tc');
     window.location.replace = function(url) {
-        if (url.includes('hanaminikata.com') && !url.includes('buydevice') && !url.includes('tc')) {
-            console.log('[BOT] Chặn redirect về:', url);
-            return;
-        }
-        return originalReplace.call(window.location, url);
+        if (!allow(url)) { console.log('[BOT] Chan replace:', url); return; }
+        return origReplace.call(window.location, url);
     };
     window.location.assign = function(url) {
-        if (url.includes('hanaminikata.com') && !url.includes('buydevice') && !url.includes('tc')) {
-            console.log('[BOT] Chặn assign về:', url);
-            return;
-        }
-        return originalAssign.call(window.location, url);
+        if (!allow(url)) { console.log('[BOT] Chan assign:', url); return; }
+        return origAssign.call(window.location, url);
     };
-
-    const originalPushState = history.pushState;
-    const originalReplaceState = history.replaceState;
+    const origPush = history.pushState;
+    const origRep = history.replaceState;
     history.pushState = function() {
-        const url = arguments[2];
-        if (url && url.includes('hanaminikata.com') && !url.includes('buydevice') && !url.includes('tc')) {
-            console.log('[BOT] Chặn pushState về:', url);
-            return;
-        }
-        return originalPushState.apply(history, arguments);
+        if (!allow(arguments[2])) { console.log('[BOT] Chan pushState:', arguments[2]); return; }
+        return origPush.apply(history, arguments);
     };
     history.replaceState = function() {
-        const url = arguments[2];
-        if (url && url.includes('hanaminikata.com') && !url.includes('buydevice') && !url.includes('tc')) {
-            console.log('[BOT] Chặn replaceState về:', url);
-            return;
-        }
-        return originalReplaceState.apply(history, arguments);
+        if (!allow(arguments[2])) { console.log('[BOT] Chan replaceState:', arguments[2]); return; }
+        return origRep.apply(history, arguments);
     };
-
-    console.log('[BOT] Anti-debug bypass activated');
+    console.log('[BOT] Anti-debug + chan redirect ON');
 })();
 """
 
-CHECK_URL_SCRIPT = """() => {
-    return window.location.href;
-}"""
+CHECK_URL_SCRIPT = "() => window.location.href"
 
 # =====================================================================
-# PARSE LOGIC
+# PARSE CHAM MAU
 # =====================================================================
 def _stock_of_text(t):
     low = t.lower()
     if 'có máy' in low or 'đang còn máy' in low: return True
     if 'hết máy' in low: return False
     if '' in t: return True
-    if any(k in t for k in ['🔴', '🟥', '🟠', '⚪']): return False
+    if any(k in t for k in ['🔴', '🟥', '🟠', '', '']): return False
     return None
 
 def parse_regions_from_text(text):
@@ -132,13 +155,11 @@ def parse_regions_from_text(text):
         r'<option[^>]*>(.*?)</option>',
         r'<li[^>]*>(.*?)</li>',
         r'<div[^>]*class="[^"]*(?:option|item|region|status|server|country)[^"]*"[^>]*>(.*?)</div>',
-        r'<span[^>]*>([^<]*(?:Singapore|Hong Kong|Japan|Germany|America)[^<]*)</span>',
     ]:
         for m in re.findall(pattern, text or '', re.S | re.I):
             chunks.append(m)
     if not chunks:
         chunks = [text or '']
-
     regions = {}
     for code, info in REGIONS.items():
         val = None
@@ -156,7 +177,7 @@ def regions_complete(regions):
     return regions is not None and all(v is not None for v in regions.values())
 
 # =====================================================================
-# JS SCRIPTS
+# JS CLICK DROPDOWN + DOC OPTIONS
 # =====================================================================
 JS_FIND_AND_CLICK = """() => {
   let el = document.querySelector('select');
@@ -166,15 +187,13 @@ JS_FIND_AND_CLICK = """() => {
     el.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
     return { found: true, type: 'select' };
   }
-  
-  const allElements = document.querySelectorAll('*');
-  for (let i = 0; i < allElements.length; i++) {
-    if (allElements[i].textContent.includes('Singapore') && allElements[i].children.length < 5) {
-      allElements[i].click();
+  const all = document.querySelectorAll('*');
+  for (let i = 0; i < all.length; i++) {
+    if (all[i].textContent.includes('Singapore') && all[i].children.length < 5) {
+      all[i].click();
       return { found: true, type: 'text-match' };
     }
   }
-  
   return { found: false };
 }"""
 
@@ -187,35 +206,36 @@ JS_READ_OPTIONS = """() => {
 }"""
 
 # =====================================================================
-# BROWSER CLASS (FIXED - NO INVALID PARAMS)
+# BROWSER CLASS - FIX: HEADLESS=FALSE + HUMANIZE
 # =====================================================================
 class ProtectedBotBrowser:
-    def __init__(self):
+    def __init__(self, cookies=None):
         if not ensure_camoufox_installed():
             raise Exception("Camoufox chưa cài")
         from camoufox.sync_api import Camoufox
-        # ✅ FIX: Chỉ dùng tham số hợp lệ
+        # FIX CHINH: headless=False de giong Chrome/Quetta that, kh lo webdriver
         self.cm = Camoufox(
-            headless=True,
+            headless=False,
+            humanize=True,
             block_images=False
         )
         self.browser = self.cm.__enter__()
         self.page = self.browser.new_page()
-        self.name = "Camoufox-Protected"
+        self.name = "Camoufox-Headed"
         self.last_url = None
-        print(f"✅ Browser {self.name} đã khởi động (Anti-debug enabled)")
+        if cookies:
+            inject_cookies(self.page, cookies)
+        print(f"✅ Browser {self.name} đã khởi động (HEADED + humanize)")
 
     def goto_with_protection(self, url):
         try:
             self.page.goto(url, wait_until="domcontentloaded", timeout=45000)
             time.sleep(3)
-            
             try:
                 self.page.evaluate(ANTI_DEBUG_BYPASS)
-                print("🛡️ Anti-debug script injected")
+                print("🛡️ Anti-debug + chan redirect injected")
             except Exception as e:
                 print(f"⚠️ Không inject được anti-debug: {e}")
-            
             self.last_url = url
             return True
         except Exception as e:
@@ -224,9 +244,9 @@ class ProtectedBotBrowser:
 
     def check_and_fix_url(self):
         try:
-            current_url = self.page.evaluate(CHECK_URL_SCRIPT)
-            if current_url and not ('buydevice' in current_url or 'tc' in current_url):
-                print(f"⚠️ Bị redirect về: {current_url[:80]}... Ép về trang đích!")
+            cur = self.page.evaluate(CHECK_URL_SCRIPT)
+            if cur and not ('buydevice' in cur or '/tc' in cur):
+                print(f"⚠️ Bị redirect về: {cur[:80]}... Ép về trang đích!")
                 return self.goto_with_protection(TARGET_URL)
             return True
         except Exception as e:
@@ -254,10 +274,10 @@ class ProtectedBotBrowser:
         try: self.cm.__exit__(None, None, None)
         except Exception: pass
 
-def create_protected_browser():
+def create_protected_browser(cookies=None):
     for attempt in range(3):
         try:
-            b = ProtectedBotBrowser()
+            b = ProtectedBotBrowser(cookies=cookies)
             if b.goto_with_protection(TARGET_URL):
                 time.sleep(5)
                 return b
@@ -265,6 +285,31 @@ def create_protected_browser():
             print(f"❌ Lỗi tạo browser lần {attempt+1}: {e}")
             time.sleep(5)
     return None
+
+# =====================================================================
+# WAIT CLOUDFLARE
+# =====================================================================
+def wait_cloudflare(browser, timeout=90):
+    start = time.time()
+    last_log = 0
+    while time.time() - start < timeout:
+        try:
+            html = browser.get_html()
+        except Exception:
+            time.sleep(3)
+            continue
+        if "just a moment" not in html.lower():
+            elapsed = int(time.time() - start)
+            if elapsed > 5:
+                print(f"✅ Đã qua Cloudflare sau {elapsed}s")
+            return True
+        now = time.time()
+        if now - last_log >= 15:
+            print(f"⏳ Đang chờ Cloudflare xác minh... (đã chờ {int(now-start)}s)")
+            last_log = now
+        time.sleep(5)
+    print(f"❌ Timeout: Cloudflare không qua sau {timeout}s")
+    return False
 
 # =====================================================================
 # DISCORD & STATE
@@ -331,20 +376,23 @@ def check_and_ping(regions, prev_state):
         except Exception: pass
 
 # =====================================================================
-# MAIN LOGIC
+# MAIN LOOP
 # =====================================================================
 def main():
-    print(f"🏁 Bắt đầu bot (Chống Anti-Console + Auto-Recovery)")
+    print(f"🏁 Bắt đầu bot (HEADED + humanize - fix fingerprint)")
     print(f"   Target: {TARGET_URL}")
-    print(f"   Fallback: {FALLBACK_URL}")
-    
+
+    hanami_cookies = load_hanami_cookies()
     msg_id, prev_state = load_state()
     last_regions = prev_state if prev_state else {c: False for c in REGIONS}
-    
-    browser = create_protected_browser()
+
+    browser = create_protected_browser(cookies=hanami_cookies)
     if not browser:
         print("❌ Không thể khởi động browser. Kết thúc.")
         return
+
+    if not wait_cloudflare(browser, timeout=120):
+        print("⚠️ Cloudflare chưa qua lần đầu, sẽ thử lại trong loop")
 
     fail_streak = 0
     restart_count = 0
@@ -367,31 +415,29 @@ def main():
                         if not browser.is_alive():
                             print("💀 Browser chết. Đang tạo mới...")
                             browser.close()
-                            browser = create_protected_browser()
+                            browser = create_protected_browser(cookies=hanami_cookies)
                             restart_count += 1
                             if not browser: break
+                            if not wait_cloudflare(browser, timeout=90):
+                                continue
 
                         if not browser.check_and_fix_url():
-                            print("⚠️ Không fix được URL, reload trang...")
                             browser.goto_with_protection(TARGET_URL)
                             time.sleep(3)
 
                         html = browser.get_html()
-                        
+
                         if 'just a moment' in html.lower():
-                            print("🛡️ Cloudflare detected. Đợi và retry...")
-                            time.sleep(10)
-                            browser.goto_with_protection(TARGET_URL)
-                            continue
-                        
-                        if 'login' in html.lower() and 'token' in html.lower():
-                            print("🔐 Trang yêu cầu Login. Thử fallback URL...")
-                            browser.goto_with_protection(FALLBACK_URL)
-                            time.sleep(3)
+                            print("🛡️ Cloudflare detected. Đang đợi...")
+                            if not wait_cloudflare(browser, timeout=60):
+                                browser.goto_with_protection(TARGET_URL)
+                                if not wait_cloudflare(browser, timeout=60):
+                                    continue
                             html = browser.get_html()
-                            if 'login' in html.lower():
-                                print("❌ Fallback cũng yêu cầu login. Skip phút này.")
-                                break
+
+                        if 'login' in html.lower() and 'token' in html.lower():
+                            print("🔐 Vẫn bị login wall dù headed -> fingerprint sâu hơn (TLS/JA3)")
+                            break
 
                         click_res = browser.click_dropdown()
                         if not click_res or not click_res.get('found'):
@@ -403,7 +449,7 @@ def main():
 
                         time.sleep(2)
                         options = browser.read_options()
-                        
+
                         if options and len(options) > 10:
                             regions = parse_regions_from_text(options)
                             if regions_complete(regions):
@@ -414,9 +460,8 @@ def main():
                                 print(f"⚠️ Parse thiếu data (lần {retry+1})")
                         else:
                             print(f"⚠️ Không đọc được options (lần {retry+1})")
-                        
                         time.sleep(5)
-                        
+
                     except Exception as e:
                         print(f"❌ Lỗi retry {retry+1}: {e}")
                         time.sleep(5)
@@ -432,14 +477,14 @@ def main():
                 else:
                     fail_streak += 1
                     print(f"❌ Fail lần {fail_streak} [{vn_now.strftime('%H:%M')}]")
-                    
                     if fail_streak >= FAIL_RESTART_THRESHOLD:
                         print(f"🛠️ FAIL STREAK {fail_streak} -> PANIC RESTART")
                         browser.close()
-                        browser = create_protected_browser()
+                        browser = create_protected_browser(cookies=hanami_cookies)
                         restart_count += 1
                         fail_streak = 0
-                    
+                        if browser and not wait_cloudflare(browser, timeout=90):
+                            print("❌ Cloudflare không qua sau panic restart")
                     if fail_streak == FAIL_ALERT_THRESHOLD:
                         send_alert(f"⚠️ Bot fail {fail_streak} lần liên tiếp!")
 
