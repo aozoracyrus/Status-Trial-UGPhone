@@ -18,18 +18,18 @@ ROLE_PING_ID = os.environ.get('ROLE_PING_ID')
 
 DURATION_MINUTES = 345
 PING_AUTO_DELETE = 300
-WAIT_AFTER_GOTO_MS = 12000
-WAIT_UI_TIMEOUT_MS = 15000
-UI_MARKER_TEXT = "Tạo máy UGPhone"
+
+# ✅ Theo yêu cầu: chờ đủ lâu cho Xvfb + Turnstile tự verify
+WAIT_AFTER_GOTO_MS = 12000      # 12s sau goto (anh yêu cầu 10-15s)
+WAIT_UI_TIMEOUT_MS = 15000      # tối đa 15s đợi text 'Tạo máy UGPhone'
+UI_MARKER_TEXT = "Tạo máy UGPhone"   # dấu hiệu UI THẬT đã load
+
+# ✅ KHÔNG panic restart. fail_streak CHỈ dùng để alert Discord.
 FAIL_ALERT_THRESHOLD = 10
 
-# ✅ MỚI: đường thoát kẹt Cloudflare (có trần, có cooldown, không panic loop)
-CF_STUCK_RESTART_MIN = 4     # kẹt CF bao nhiêu phút thì mở context mới
-MAX_CF_RESTART = 3           # tối đa mấy context mới mỗi job
-CF_RESTART_COOLDOWN_S = 30   # nghỉ cho IP nguội trước khi mở lại
-
-MAX_BROWSER_REOPEN = 3       # chỉ khi browser CHẾT THẬT (really-dead)
-REOPEN_COOLDOWN_S = 60
+# ✅ Chỉ mở lại browser khi CHẾT THẬT, có cooldown + giới hạn
+MAX_BROWSER_REOPEN = 3
+REOPEN_COOLDOWN_S = 60          # chờ IP "nguội" trước khi mở lại
 
 DATA_DIR = "data"
 DEBUG_DIR = os.path.join(DATA_DIR, "debug")
@@ -40,11 +40,12 @@ DEBUG_SHOT = os.path.join(DEBUG_DIR, "last_error.png")
 REGIONS = {
     'SG': {'name': 'Singapore', 'flag': '🇸🇬'},
     'HK': {'name': 'Hong Kong', 'flag': '🇭🇰'},
-    'JP': {'name': 'Japan', 'flag': '🇯'},
+    'JP': {'name': 'Japan', 'flag': '🇯🇵'},
     'DE': {'name': 'Germany', 'flag': '🇩🇪'},
     'US': {'name': 'America', 'flag': '🇺🇸'}
 }
-VIEWPORT = {'width': 1920, 'height': 1080}
+
+VIEWPORT = {'width': 1920, 'height': 1080}   # ✅ đồng bộ Xvfb
 
 tz_vn = pytz.timezone('Asia/Ho_Chi_Minh')
 def get_time_24h():
@@ -64,22 +65,7 @@ def ensure_camoufox_installed():
         return False
 
 # =====================================================================
-# ✅ MỚI: nhận diện trang Cloudflare "Verifying you are human"
-#    (KHÔNG dùng 'login'/'token' — đó là bệnh cũ. Chỉ 3 câu đặc trưng CF)
-# =====================================================================
-def is_cf_verifying(html):
-    if not html:
-        return False
-    low = html.lower()
-    return ('verifying you are human' in low
-            or 'this may take a few seconds' in low
-            or 'checking your browser' in low)
-
-def has_real_ui(html):
-    return bool(html) and (UI_MARKER_TEXT.lower() in html.lower())
-
-# =====================================================================
-# PARSE CHẤM MÀU (giữ nguyên)
+# PARSE CHẤM MÀU (giữ nguyên, đã ổn định)
 # =====================================================================
 def _stock_of_text(t):
     low = t.lower()
@@ -117,7 +103,7 @@ def regions_complete(regions):
     return regions is not None and all(v is not None for v in regions.values())
 
 # =====================================================================
-# JS (giữ nguyên)
+# JS
 # =====================================================================
 JS_FIND_AND_CLICK = """() => {
   let el = document.querySelector('select');
@@ -145,25 +131,28 @@ JS_READ_OPTIONS = """() => {
   return out.join('\\n---SEP---\\n');
 }"""
 
+# =====================================================================
+# BROWSER - HEADFUL, VIEWPORT CHUẨN, KIÊN NHẪN, KHÔNG PANIC
+# =====================================================================
 DEAD_MARKERS = (
     'target closed', 'target page, context or browser',
     'browser has been closed', 'no such window', 'connection refused',
     'httpconnectionpool', 'net::err_connection'
 )
+
 def _is_really_dead(e):
     m = str(e).lower()
     return any(k in m for k in DEAD_MARKERS)
 
-# =====================================================================
-# BROWSER (giữ headful + viewport; thêm peek_html KHÔNG reload)
-# =====================================================================
 class PatientBrowser:
     def __init__(self):
         if not ensure_camoufox_installed():
             raise Exception("Camoufox chưa cài")
         from camoufox.sync_api import Camoufox
+        # ✅ headful + humanize, KHÔNG chặn ảnh (giống người thật)
         self.cm = Camoufox(headless=False, humanize=True, block_images=False)
         self.browser = self.cm.__enter__()
+        # ✅ viewport 1920x1080 đồng bộ Xvfb để toạ độ Turnstile chính xác
         self.page = self.browser.new_page(viewport=VIEWPORT)
         try:
             self.page.set_viewport_size(VIEWPORT)
@@ -174,22 +163,36 @@ class PatientBrowser:
         print(f"✅ Browser {self.name} đã khởi động (viewport {VIEWPORT['width']}x{VIEWPORT['height']})")
 
     def load_and_wait(self, url):
+        """goto + chờ đủ lâu cho Xvfb render + Turnstile tự verify."""
         self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        self.page.wait_for_timeout(WAIT_AFTER_GOTO_MS)
+        self.page.wait_for_timeout(WAIT_AFTER_GOTO_MS)   # ✅ 12s kiên nhẫn
 
-    def peek_html(self):
-        """Đọc DOM tab HIỆN TẠI, KHÔNG reload (dùng khi kẹt CF để không phá verify)."""
+    def try_click_turnstile(self):
+        """Best-effort click vùng Turnstile (null-safe, KHÔNG fail nếu không có)."""
         try:
-            return self.page.content()
+            el = self.page.query_selector(
+                'iframe[src*="challenges.cloudflare.com"], iframe[title*="Cloudflare"]'
+            )
+            if el:
+                box = el.bounding_box()
+                if box:
+                    self.page.mouse.click(
+                        box['x'] + box['width'] / 2,
+                        box['y'] + box['height'] / 2
+                    )
+                    print("🖱️ Đã click vào vùng Turnstile (best-effort)")
+                    self.page.wait_for_timeout(3000)
+                    return True
         except Exception as e:
-            if _is_really_dead(e):
-                raise
-            return ""
+            print(f"⚠️ try_click_turnstile bỏ qua: {e}")
+        return False
 
     def wait_for_real_ui(self):
+        """✅ CHỈ đợi text 'Tạo máy UGPhone' = UI thật đã load. Trả bool, KHÔNG raise."""
         try:
             self.page.get_by_text(UI_MARKER_TEXT, exact=False).first.wait_for(
-                state="visible", timeout=WAIT_UI_TIMEOUT_MS)
+                state="visible", timeout=WAIT_UI_TIMEOUT_MS
+            )
             return True
         except Exception:
             return False
@@ -211,6 +214,7 @@ class PatientBrowser:
             return None
 
     def screenshot_debug(self):
+        """✅ Lỗi thì chụp ảnh, KHÔNG restart."""
         try:
             ensure_dirs()
             self.page.screenshot(path=DEBUG_SHOT, full_page=True)
@@ -223,14 +227,13 @@ class PatientBrowser:
             _ = self.page.title()
             return True
         except Exception as e:
-            return not _is_really_dead(e)
+            return not _is_really_dead(e)   # navigation != chết
 
     def close(self):
         try: self.cm.__exit__(None, None, None)
         except Exception: pass
 
 def open_browser():
-    """Mở browser mới + goto 1 lần (chạy challenge). Trả browser hoặc None."""
     try:
         b = PatientBrowser()
         b.load_and_wait(TARGET_URL)
@@ -285,14 +288,11 @@ def push_embed(regions, msg_id=None):
     return msg_id
 
 def send_alert(content):
-    if not WEBHOOK_URL:
-        print(f"🚨 (khong webhook) {content[:90]}")
-        return
+    if not WEBHOOK_URL: return
     try:
         requests.post(WEBHOOK_URL, json={"content": content})
         print(f"🚨 Alert: {content[:80]}")
-    except Exception as e:
-        print(f"⚠️ Alert lỗi (webhook/secret?): {e}")
+    except Exception: pass
 
 def check_and_ping(regions, prev_state):
     if not ROLE_PING_ID or not WEBHOOK_URL: return
@@ -307,28 +307,12 @@ def check_and_ping(regions, prev_state):
         except Exception: pass
 
 # =====================================================================
-# ĐỌC DATA (click + read trên tab đang ở trang thật)
-# =====================================================================
-def do_read(browser):
-    click_res = browser.click_dropdown()
-    if not click_res or not click_res.get('found'):
-        return None, 'no-dropdown'
-    browser.page.wait_for_timeout(2000)
-    options = browser.read_options()
-    if options and len(options) > 10:
-        parsed = parse_regions_from_text(options)
-        if regions_complete(parsed):
-            return parsed, 'DROPDOWN'
-        return None, 'incomplete'
-    return None, 'no-options'
-
-# =====================================================================
-# MAIN LOOP — có đường thoát kẹt CF (không còn chết lâm sàng vô hạn)
+# MAIN LOOP - KIÊN NHẪN, KHÔNG PANIC, GIỮ cf_clearance
 # =====================================================================
 def main():
-    print(f"🏁 v4.1 — headful + kiên nhẫn + THOÁT KẸT CLOUDFLARE (có trần)")
+    print(f"🏁 Bắt đầu bot (HEADFUL + kiên nhẫn, KHÔNG login-wall check, KHÔNG panic restart)")
     print(f"   Target: {TARGET_URL}")
-    print(f"   Kẹt CF >= {CF_STUCK_RESTART_MIN}p -> context mới (max {MAX_CF_RESTART}), vượt -> job sau IP mới")
+    print(f"   Chờ sau goto: {WAIT_AFTER_GOTO_MS}ms | Đợi UI: {WAIT_UI_TIMEOUT_MS}ms | Viewport: {VIEWPORT}")
 
     ensure_dirs()
     msg_id, prev_state = load_state()
@@ -336,19 +320,13 @@ def main():
 
     browser = open_browser()
     if not browser:
-        print("❌ Không mở được browser lần đầu. Kết thúc job êm (relay sau thử).")
+        print("❌ Không mở được browser lần đầu. Kết thúc job (relay job sau sẽ thử).")
         return
-
-    # Sau mọi lần mở browser => tab co dang verify => bat dau o trang thai stuck
-    cf_stuck = True
-    cf_stuck_min = 0
-    cf_restart_used = 0
 
     fail_streak = 0
     reopen_count = 0
     last_minute_key = None
     start_time = time.time()
-    exit_reason = None
 
     try:
         while (time.time() - start_time) / 60 < DURATION_MINUTES:
@@ -361,98 +339,68 @@ def main():
 
             regions = None
             via = "NONE"
-            soft = False
+            soft_fail = False   # ✅ lỗi "mềm": UI chưa load / parse thiếu -> KHÔNG restart
 
             try:
-                if cf_stuck:
-                    # ===== KẸT CF: KHÔNG reload, chỉ peek chờ CF tự pass =====
-                    html = browser.peek_html()
-                    if is_cf_verifying(html):
-                        cf_stuck_min += 1
-                        if cf_stuck_min == 1:
-                            browser.screenshot_debug()
-                        if cf_stuck_min >= CF_STUCK_RESTART_MIN:
-                            if cf_restart_used >= MAX_CF_RESTART:
-                                exit_reason = 'cf'
-                                print(f"🛑 Kẹt CF qua {MAX_CF_RESTART} context. Kết thúc job êm -> job sau IP mới.")
-                                send_alert(f"🛑 Bot kẹt Cloudflare {MAX_CF_RESTART} context, nhường job sau lấy IP mới (runner mới).")
-                                break
-                            cf_restart_used += 1
-                            print(f"🔄 Kẹt CF {cf_stuck_min}p -> mở context mới lần {cf_restart_used}/{MAX_CF_RESTART} (cooldown {CF_RESTART_COOLDOWN_S}s)")
-                            send_alert(f"🔄 Kẹt Cloudflare {cf_stuck_min} phút, mở browser mới (identity mới) lần {cf_restart_used}.")
-                            try: browser.close()
-                            except Exception: pass
-                            time.sleep(CF_RESTART_COOLDOWN_S)
-                            browser = open_browser()
-                            if not browser:
-                                exit_reason = 'open-fail'
-                                print("❌ Mở context mới thất bại. Kết thúc job êm.")
-                                break
-                            cf_stuck = True
-                            cf_stuck_min = 0
-                            soft = True
-                        else:
-                            print(f"⏳ [{vn_now.strftime('%H:%M')}] Kẹt CF {cf_stuck_min}/{CF_STUCK_RESTART_MIN}p -> chờ tự pass, KHÔNG reload.")
-                            soft = True
-                    elif has_real_ui(html):
-                        # CF vừa tự pass, tab đã ở trang thật -> đọc ngay
-                        print(f"✅ [{vn_now.strftime('%H:%M')}] Qua Cloudflare, xanh lại.")
-                        cf_stuck = False
-                        cf_stuck_min = 0
-                        regions, via = do_read(browser)
-                        if regions is None:
-                            soft = True
-                            browser.screenshot_debug()
-                    else:
-                        # không CF, không UI: trung gian (CF pass nhưng UI chưa render / trang lạ)
-                        cf_stuck_min += 1
-                        print(f"⏳ [{vn_now.strftime('%H:%M')}] Trang trung gian (không CF, chưa có UI) {cf_stuck_min}p -> chờ thêm.")
-                        soft = True
+                # Reload NHẸ trên cùng browser (giữ cf_clearance tích luỹ)
+                browser.load_and_wait(TARGET_URL)
+                browser.try_click_turnstile()
+
+                # ✅ CHỈ đợi UI thật. Không check login, không check 'just a moment'.
+                if not browser.wait_for_real_ui():
+                    print(f"⏳ [{vn_now.strftime('%H:%M')}] UI '{UI_MARKER_TEXT}' chưa hiện "
+                          f"(Xvfb chậm / Turnstile đang verify) -> giữ browser, thử lại phút sau. KHÔNG restart.")
+                    browser.screenshot_debug()
+                    soft_fail = True
                 else:
-                    # ===== XANH: reload bình thường (goto + click + read) =====
-                    browser.load_and_wait(TARGET_URL)
-                    html = browser.peek_html()
-                    if is_cf_verifying(html):
-                        cf_stuck = True
-                        cf_stuck_min = 1
+                    click_res = browser.click_dropdown()
+                    if not click_res or not click_res.get('found'):
+                        print(f"⚠️ [{vn_now.strftime('%H:%M')}] Không thấy dropdown -> chụp debug, KHÔNG restart.")
                         browser.screenshot_debug()
-                        print(f"🟡 [{vn_now.strftime('%H:%M')}] Rơi vào Cloudflare verifying -> chuyển sang chờ (không reload nữa).")
-                        send_alert("🟡 Bot rơi vào trang 'Verifying you are human' của Cloudflare, đang chờ tự pass (đã ngừng reload để không phá verify).")
-                        soft = True
-                    elif browser.wait_for_real_ui():
-                        regions, via = do_read(browser)
-                        if regions is None:
-                            soft = True
-                            browser.screenshot_debug()
+                        soft_fail = True
                     else:
-                        print(f"⚠️ [{vn_now.strftime('%H:%M')}] UI chưa hiện (render chậm) -> giữ browser, phút sau thử lại.")
-                        soft = True
+                        browser.page.wait_for_timeout(2000)
+                        options = browser.read_options()
+                        if options and len(options) > 10:
+                            parsed = parse_regions_from_text(options)
+                            if regions_complete(parsed):
+                                regions = parsed
+                                via = "DROPDOWN"
+                            else:
+                                print(f"⚠️ [{vn_now.strftime('%H:%M')}] Parse thiếu region -> chụp debug, KHÔNG restart.")
+                                browser.screenshot_debug()
+                                soft_fail = True
+                        else:
+                            print(f"⚠️ [{vn_now.strftime('%H:%M')}] Không đọc được options -> chụp debug, KHÔNG restart.")
+                            browser.screenshot_debug()
+                            soft_fail = True
 
             except Exception as e:
                 if _is_really_dead(e):
+                    # ✅ Browser CHẾT THẬT -> mới mở lại, có cooldown + giới hạn
                     print(f"💀 Browser chết thật: {str(e)[:80]}...")
                     try: browser.close()
                     except Exception: pass
                     reopen_count += 1
                     if reopen_count > MAX_BROWSER_REOPEN:
-                        exit_reason = 'dead'
-                        print(f"🛑 Chết thật {reopen_count} lần (quá {MAX_BROWSER_REOPEN}). Kết thúc job êm.")
+                        print(f"🛑 Đã mở lại {reopen_count} lần (quá giới hạn {MAX_BROWSER_REOPEN}). "
+                              f"Kết thúc job êm để relay job sau tiếp (IP đã nguội).")
                         break
+                    print(f"⏳ Cooldown {REOPEN_COOLDOWN_S}s cho IP nguội trước khi mở lại...")
                     time.sleep(REOPEN_COOLDOWN_S)
                     browser = open_browser()
                     if not browser:
-                        exit_reason = 'open-fail'
+                        print("❌ Mở lại thất bại. Kết thúc job êm.")
                         break
-                    cf_stuck = True
-                    cf_stuck_min = 0
-                    soft = True
+                    soft_fail = True
                 else:
-                    print(f"⚠️ Lỗi mềm: {e} -> chụp debug, giữ browser.")
+                    # Exception lạ (không phải chết) -> coi như soft fail, KHÔNG restart
+                    print(f"⚠️ Lỗi mềm: {e} -> chụp debug, giữ browser, KHÔNG restart.")
                     try: browser.screenshot_debug()
                     except Exception: pass
-                    soft = True
+                    soft_fail = True
 
-            # ===== KẾT QUẢ =====
+            # ✅ Xử lý kết quả: soft_fail CHỈ tăng streak để alert, KHÔNG đụng browser
             if regions is not None:
                 check_and_ping(regions, prev_state)
                 prev_state = regions
@@ -462,17 +410,16 @@ def main():
                 print(f"✅ Check [{vn_now.strftime('%H:%M')}] ({via}): {ket_qua}")
             else:
                 fail_streak += 1
-                tag = 'cf-stuck' if cf_stuck else ('soft' if soft else 'unknown')
-                print(f"❌ Fail lần {fail_streak} [{vn_now.strftime('%H:%M')}] ({tag})")
-                if fail_streak == FAIL_ALERT_THRESHOLD or (fail_streak > FAIL_ALERT_THRESHOLD and fail_streak % 30 == 0):
-                    send_alert(f"⚠️ Bot không đọc được stock {fail_streak} phút liên tiếp (mode: {tag}). Ảnh debug: data/debug/last_error.png")
+                print(f"❌ Fail lần {fail_streak} [{vn_now.strftime('%H:%M')}] "
+                      f"({'soft - giữ browser' if soft_fail else 'unknown'})")
+                if fail_streak == FAIL_ALERT_THRESHOLD or (fail_streak > FAIL_ALERT_THRESHOLD and fail_streak % 60 == 0):
+                    send_alert(f"⚠️ Bot UGPhone không đọc được stock {fail_streak} phút liên tiếp "
+                               f"(đã chụp debug/data/last_error.png). KHÔNG panic restart - đang kiên nhẫn chờ.")
 
             msg_id = push_embed(last_regions, msg_id)
             save_state(msg_id, last_regions)
-            print(f"🕐 Footer: {vn_now.strftime('%H:%M:%S')} (reopen chết: {reopen_count} | cf-context: {cf_restart_used} | stuck: {cf_stuck})")
+            print(f"🕐 Footer: {vn_now.strftime('%H:%M:%S')} (reopen thật: {reopen_count})")
 
-            if exit_reason:
-                break
             time.sleep(0.5)
 
     except KeyboardInterrupt:
@@ -481,7 +428,7 @@ def main():
         if browser:
             try: browser.close()
             except Exception: pass
-        print(f"⏰ Kết thúc job. reason={exit_reason or 'hết 345p'} (chết:{reopen_count} cf-context:{cf_restart_used})")
+        print(f"⏰ Kết thúc job. (browser mở lại thật: {reopen_count} lần)")
 
 if __name__ == "__main__":
     main()
