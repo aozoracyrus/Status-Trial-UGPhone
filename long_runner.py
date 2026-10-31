@@ -46,7 +46,7 @@ DEBUG_SHOT = os.path.join(DEBUG_DIR, "last_error.png")
 
 REGIONS = {
     'SG': {'name': 'Singapore', 'flag': '🇸🇬'},
-    'HK': {'name': 'Hong Kong', 'flag': '🇭'},
+    'HK': {'name': 'Hong Kong', 'flag': '🇭🇰'},
     'JP': {'name': 'Japan', 'flag': '🇯🇵'},
     'DE': {'name': 'Germany', 'flag': '🇩🇪'},
     'US': {'name': 'America', 'flag': '🇺🇸'}
