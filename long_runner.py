@@ -16,6 +16,7 @@ TARGET_URL = "https://hanaminikata.com/tools/buydevice_ugphone"
 WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL')
 ROLE_PING_ID = os.environ.get('ROLE_PING_ID')
 
+# OWNER_ID đọc từ env, KHÔNG in ra log (repo public -> ai mở log cũng thấy)
 OWNER_ID = os.environ.get('OWNER_ID', '1160199218313564210')
 OWNER_PING_DELETE_S = 300          # xóa tin ping chủ sau 5 phút
 OWNER_PING_RESEND_MIN = 30         # lỗi chưa fix sau 30 phút -> nhắc lại
@@ -31,6 +32,7 @@ FETCH_ERR_MARK = '__FETCH_ERR__'
 MAX_FETCH_ERR = 3
 
 CF_STUCK_RESTART_MIN = 4
+CF_GRACE_MIN = 2          # 🆕 v4.8: CF thoáng qua <= grace -> giữ embed xanh, chưa tính fail
 MAX_CF_RESTART = 3
 CF_RESTART_COOLDOWN_S = 30
 MAX_REAL_GOTO = 6
@@ -47,10 +49,10 @@ DEBUG_SHOT = os.path.join(DEBUG_DIR, "last_error.png")
 
 REGIONS = {
     'SG': {'name': 'Singapore', 'flag': '🇸🇬'},
-    'HK': {'name': 'Hong Kong', 'flag': '🇭'},
+    'HK': {'name': 'Hong Kong', 'flag': '🇭🇰'},
     'JP': {'name': 'Japan', 'flag': '🇯🇵'},
     'DE': {'name': 'Germany', 'flag': '🇩🇪'},
-    'US': {'name': 'America', 'flag': '🇺'}
+    'US': {'name': 'America', 'flag': '🇺🇸'}
 }
 VIEWPORT = {'width': 1920, 'height': 1080}
 
@@ -105,9 +107,7 @@ def classify(html):
     return 'UNK'
 
 # =====================================================================
-# 🆕 v4.7: tách "tóm tắt lỗi" và "lí do" thành 2 mảnh cho embed 3 dòng
-#   summary -> sau "🚨 Đang gặp lỗi:"
-#   reason  -> sau "🤔 Lí do:"
+# 🆕 v4.7: tách "tóm tắt lỗi" và "lí do" cho embed 3 dòng
 # =====================================================================
 def error_summary_reason(mode, via):
     if mode == 'SRV':
@@ -122,7 +122,6 @@ def error_summary_reason(mode, via):
         return ("Không cập nhật được trạng thái máy",
                 "Trang trả về nội dung lạ, bot chưa nhận diện được "
                 "(KHÔNG phải tường đăng nhập).")
-    # mode == GREEN nhưng đọc data fail
     if via == 'no-dropdown':
         return ("Không đọc được danh sách khu vực",
                 "Trang vẫn mở nhưng bot không tìm thấy ô chọn khu vực để đọc.")
@@ -227,6 +226,10 @@ class PatientBrowser:
         if not ensure_camoufox_installed():
             raise Exception("Camoufox chưa cài")
         from camoufox.sync_api import Camoufox
+        # NOTE: LeakWarning "Canvas and WebGL readback return random data" là CẢNH BÁO vô hại,
+        #       không chặn khởi động (bot vẫn xanh). Camoufox mặc định bật canvas_noise để
+        #       chống fingerprint-link; tắt nó (canvas_noise=False) là trade-off KHÔNG chắc
+        #       thắng và VI PHẠM đóng băng khi bot đang xanh -> GIỮ NGUYÊN, chỉ ghi chú.
         self.cm = Camoufox(headless=False, humanize=True, block_images=False)
         self.browser = self.cm.__enter__()
         self.page = self.browser.new_page(viewport=VIEWPORT)
@@ -363,12 +366,13 @@ def read_via_fetch_or_dom(browser, html_from_fetch):
 
 # =====================================================================
 # DISCORD & STATE
-#   v4.7: Discord CHỈ nhận 3 loại:
+#   v4.8: Discord CHỈ nhận 3 loại:
 #     (1) EMBED  — edit cùng 1 msg_id; xanh = 5 khu vực; lỗi = 🚨/🤔/🛠️ (3 dòng)
-#     (2) OWNER PING — chỉ khi lỗi dai dẳng; post rồi TỰ XÓA 5p; nhắc lại 30p
+#     (2) OWNER PING — chỉ khi lỗi dai dẳng VƯỢT grace; post rồi TỰ XÓA 5p; nhắc lại 30p
 #     (3) ROLE PING — khi có máy mới (core, giữ); tự xóa 5p
-#   MỌI sự cố nội bộ (mở context / fetch lỗi / 520 / UNK / fail streak)
-#   -> CHỈ print log GitHub. KHÔNG send_alert, KHÔNG post kênh. (đã cắt từ v4.6)
+#   🆕 v4.8 GRACE: CF thoáng qua <= CF_GRACE_MIN -> KHÔNG fail, GIỮ embed xanh, KHÔNG réo.
+#   MỌI sự cố nội bộ (mở context / fetch lỗi / 520 / UNK / fail streak) -> CHỈ print log.
+#   KHÔNG send_alert, KHÔNG post kênh. (cắt từ v4.6)
 # =====================================================================
 def load_state():
     msg_id, prev_state = None, {}
@@ -398,7 +402,6 @@ def build_embed(regions):
     return {"title": "📱 Trạng thái UGPhone Trial", "color": color,
             "fields": fields, "footer": {"text": f"Uptime: {get_time_24h()}"}}
 
-# 🆕 v4.7: embed lỗi 3 dòng đúng ý anh (🚨 tóm tắt / 🤔 lí do / 🛠️ cam kết)
 def build_embed_error(summary, reason, fail_streak):
     desc = (f"🚨 **Đang gặp lỗi:** {summary}\n"
             f"🤔 **Lí do:** {reason}\n"
@@ -442,14 +445,16 @@ def send_owner_ping():
     content = (f"<@{OWNER_ID}> ⚠️ Bot đang bị lỗi rồi kìa, mau mau fix lỗi nhanh "
                f"để cho các ae biết server máy nào còn ‼️")
     if not WEBHOOK_URL:
-        print(f"📣 (khong webhook) OWNER PING: {content[:70]}...")
+        # 🆕 v4.8: KHÔNG in content (chứa <@OWNER_ID> -> lộ ID trên log public). Chỉ marker.
+        print("📣 (khong webhook) OWNER PING skipped")
         return None
     try:
         r = requests.post(f"{WEBHOOK_URL}?wait=true", json={"content": content})
         if r.status_code == 200:
             pid = r.json().get("id")
             if pid:
-                print(f"📣 Đã ping chủ (id={pid}), tự xóa sau {OWNER_PING_DELETE_S}s")
+                # pid = message id (không phải user id) -> in harmless
+                print(f"📣 Đã ping chủ (msg={pid}), tự xóa sau {OWNER_PING_DELETE_S}s")
                 delete_message_after(pid, OWNER_PING_DELETE_S)
                 return pid
     except Exception as e:
@@ -472,8 +477,8 @@ def check_and_ping(regions, prev_state):
 # MAIN LOOP
 # =====================================================================
 def main():
-    print(f"🏁 v4.7 — embed lỗi 3 dòng (🚨/🤔/🛠️) + kênh chỉ còn embed/ping, sự cố nội bộ -> log")
-    print(f"   Target: {TARGET_URL} | Owner ping: <@{OWNER_ID}>")
+    # 🆕 v4.8: header SẠCH — không in target URL thừa, không in Owner ID, không mô tả nội bộ
+    print("🏁 v4.8 starting")
 
     ensure_dirs()
     msg_id, prev_state = load_state()
@@ -503,7 +508,7 @@ def main():
         except Exception: pass
     if mode == 'SRV':
         browser.screenshot_debug()
-        print("🟠 Mở job đã thấy server Hanami 520/5xx -> CHỜ thụ động (log thôi, không post kênh).")
+        print("🟠 Mở job đã thấy server Hanami 520/5xx -> CHỜ thụ động (log thôi).")
     print(f"🧭 Mode khởi đầu: {mode} (goto đã dùng {real_goto_used}/{MAX_REAL_GOTO})")
 
     cf_restart_used = 0
@@ -670,7 +675,7 @@ def main():
                     except Exception: pass
                     soft = True
 
-            # ===== KẾT QUẢ: EMBED (xanh / lỗi 3 dòng) + OWNER PING (xóa 5p/nhắc 30p) =====
+            # ===== KẾT QUẢ: EMBED (xanh / lỗi 3 dòng) + GRACE + OWNER PING =====
             if regions is not None:
                 check_and_ping(regions, prev_state)
                 prev_state = regions
@@ -679,6 +684,13 @@ def main():
                 last_owner_ping_ts = None
                 ket_qua = ", ".join(f"{c}: {bool(regions.get(c))}" for c in ['SG','HK','JP','DE','US'])
                 print(f"✅ Check [{hhmm}] ({via}): {ket_qua}")
+                msg_id = push_embed(last_regions, msg_id)
+            elif mode == 'CF' and cf_min <= CF_GRACE_MIN:
+                # 🆕 v4.8 GRACE: CF thoáng qua trong grace -> KHÔNG tính fail, GIỮ embed xanh
+                # (refresh uptime), KHÔNG đổi đỏ, KHÔNG réo chủ. Giết flicker đỏ-xanh.
+                # Cơ chế tự cứu (reset context sau CF_STUCK_RESTART_MIN) nằm trong luồng phía
+                # trên, KHÔNG bị grace vô hiệu hóa -> kẹt thật vẫn được cứu như cũ.
+                print(f"⏳ [{hhmm}] CF thoáng qua (cf_min={cf_min}<={CF_GRACE_MIN}) -> giữ embed xanh, chưa tính fail.")
                 msg_id = push_embed(last_regions, msg_id)
             else:
                 fail_streak += 1
