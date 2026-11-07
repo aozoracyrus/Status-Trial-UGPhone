@@ -1,5 +1,4 @@
-seleniumbase
-camoufox
+camoufox[geoip]
 beautifulsoup4
 requests
 pytz
