@@ -46,9 +46,9 @@ DEBUG_SHOT = os.path.join(DEBUG_DIR, "last_error.png")
 
 # MỖI flag = 2 ký tự regional-indicator. ĐỪNG để cụt 1 ký tự.
 REGIONS = {
-    'SG': {'name': 'Singapore', 'flag': '🇸'},  # U+1F1F8 U+1F1EC
-    'HK': {'name': 'Hong Kong',  'flag': '🇭'},  # U+1F1ED U+1F1F0
-    'JP': {'name': 'Japan',       'flag': '🇯'},  # U+1F1EF U+1F1F5
+    'SG': {'name': 'Singapore', 'flag': '🇸🇬'},  # U+1F1F8 U+1F1EC
+    'HK': {'name': 'Hong Kong',  'flag': '🇭🇰'},  # U+1F1ED U+1F1F0
+    'JP': {'name': 'Japan',       'flag': '🇯🇵'},  # U+1F1EF U+1F1F5
     'DE': {'name': 'Germany',     'flag': '🇩🇪'},  # U+1F1E9 U+1F1EA
     'US': {'name': 'America',     'flag': '🇺🇸'},  # U+1F1FA U+1F1F8
 }
