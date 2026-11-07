@@ -16,17 +16,16 @@ WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL')
 ROLE_PING_ID = os.environ.get('ROLE_PING_ID')
 
 OWNER_ID = os.environ.get('OWNER_ID', '1160199218313564210')
-OWNER_PING_FAIL_THRESHOLD = 2      # lỗi NGHIÊM TRỌNG liên tiếp >= p này mới ping
-OWNER_PING_COOLDOWN_S = 600        # sau khi xóa ping, chặn post lại 10p (chống flap)
+OWNER_PING_FAIL_THRESHOLD = 2
+OWNER_PING_COOLDOWN_S = 600
 
 DURATION_MINUTES = 345
 PING_AUTO_DELETE = 300
-WAIT_AFTER_GOTO_S = 12             # giây (DrissionPage page.wait() dùng GIÂY, không phải ms)
+WAIT_AFTER_GOTO_S = 12             # giây (DrissionPage page.wait() dùng GIÂY)
 UI_MARKER_TEXT = "Tạo máy UGPhone"
 
-# --- v5.0: peek-only mặc định (KHÔNG goto mỗi phút) + goto thưa chống stale ---
-REFRESH_EVERY_MIN = 10             # mỗi N phút goto 1 lần re-hydrate (PHỎNG ĐOÁN, verify bằng log)
-MAX_REAL_GOTO = 40                 # 345/10 ~= 35 -> chừa 40
+REFRESH_EVERY_MIN = 10             # goto-thừa chống stale (đang bị nghi là nguồn UNK, chờ anh quyết)
+MAX_REAL_GOTO = 40
 
 CF_STUCK_RESTART_MIN = 4
 CF_GRACE_MIN = 2
@@ -36,7 +35,7 @@ UNK_GIVEUP_MIN = 8
 MAX_BROWSER_REOPEN = 3
 REOPEN_COOLDOWN_S = 60
 
-READ_FAIL_VIAS = ('incomplete', 'no-options')   # v5.0 bỏ 'no-dropdown' (không còn click dropdown)
+READ_FAIL_VIAS = ('incomplete', 'no-options')
 
 DATA_DIR = "data"
 DEBUG_DIR = os.path.join(DATA_DIR, "debug")
@@ -45,11 +44,11 @@ PREV_STATE_FILE = os.path.join(DATA_DIR, "prev_state.json")
 OWNER_PING_ID_FILE = os.path.join(DATA_DIR, "owner_ping_id.txt")
 DEBUG_SHOT = os.path.join(DEBUG_DIR, "last_error.png")
 
-# MỖI flag = 2 ký tự regional-indicator (U+1F1E6..U+1F1FF). ĐỪNG để cụt 1 ký tự.
+# MỖI flag = 2 ký tự regional-indicator. ĐỪNG để cụt 1 ký tự.
 REGIONS = {
-    'SG': {'name': 'Singapore', 'flag': '🇸🇬'},  # U+1F1F8 U+1F1EC
-    'HK': {'name': 'Hong Kong',  'flag': '🇭🇰'},  # U+1F1ED U+1F1F0
-    'JP': {'name': 'Japan',       'flag': '🇯🇵'},  # U+1F1EF U+1F1F5
+    'SG': {'name': 'Singapore', 'flag': '🇸'},  # U+1F1F8 U+1F1EC
+    'HK': {'name': 'Hong Kong',  'flag': '🇭'},  # U+1F1ED U+1F1F0
+    'JP': {'name': 'Japan',       'flag': '🇯'},  # U+1F1EF U+1F1F5
     'DE': {'name': 'Germany',     'flag': '🇩🇪'},  # U+1F1E9 U+1F1EA
     'US': {'name': 'America',     'flag': '🇺🇸'},  # U+1F1FA U+1F1F8
 }
@@ -119,8 +118,6 @@ def error_summary_reason(mode, via):
 
 # =====================================================================
 # PARSE (chạy trên string page.html, KHÔNG cần JS)
-#   Thứ tự ưu tiên: text VN -> 🟢 (còn) -> màu hết -> None (chưa rõ).
-#   KHÔNG có chuỗi rỗng '' trong list màu (lỗi cẩu thả đã sửa).
 # =====================================================================
 def _stock_of_text(t):
     low = t.lower()
@@ -163,11 +160,9 @@ def regions_complete(regions):
 class ChromeCDPBrowser:
     def __init__(self):
         opt = ChromiumOptions()
-        # headed mặc định (KHÔNG gọi headless()) -> cần Xvfb. KHÔNG set UA/window
-        # (để Chrome thật tự khai UA đúng version + Xvfb lo size) -> khớp drift_test PASS.
-        opt.set_argument('--no-sandbox')             # bắt buộc trong container GitHub
-        opt.set_argument('--disable-dev-shm-usage')  # /dev/shm nhỏ trên runner
-        opt.set_argument('--disable-gpu')            # Xvfb không GPU thật -> software render
+        opt.set_argument('--no-sandbox')
+        opt.set_argument('--disable-dev-shm-usage')
+        opt.set_argument('--disable-gpu')
         self.page = ChromiumPage(opt)
         self.name = "DrissionPage-ChromeCDP"
         print(f"✅ Browser {self.name} đã khởi động (headed + CDP, Xvfb 1920x1080)")
@@ -182,7 +177,6 @@ class ChromeCDPBrowser:
             return False
 
     def peek_html(self):
-        """DOM live outerHTML (đã hydrate). Catch-all -> '' khi lỗi (mềm, KHÔNG raise)."""
         try:
             return self.page.html or ""
         except Exception as e:
@@ -190,7 +184,6 @@ class ChromeCDPBrowser:
             return ""
 
     def parse_data(self):
-        """Parse 5 region thẳng từ page.html. Trả (regions|None, via)."""
         html = self.peek_html()
         if not html:
             return None, 'no-options'
@@ -198,11 +191,10 @@ class ChromeCDPBrowser:
         if regions_complete(parsed):
             return parsed, 'DOM'
         if has_real_ui(html):
-            return None, 'incomplete'   # GREEN-mù (critical)
+            return None, 'incomplete'
         return None, 'no-options'
 
     def click_turnstile(self):
-        """Best-effort. Test chứng minh CF tự nhả không cần click -> fail ở đây VÔ HẠI."""
         sels = [
             'css:iframe[src*="challenges.cloudflare.com"]',
             'css:iframe[title*="Cloudflare"]',
@@ -231,7 +223,6 @@ class ChromeCDPBrowser:
             print(f"⚠️ Chụp debug thất bại: {e}")
 
     def is_really_alive(self):
-        """Thử đọc title. Browser chết -> raise -> False. Trang CF verify -> title tồn tại -> True."""
         try:
             _ = self.page.title
             return True
@@ -254,7 +245,7 @@ def open_browser():
         return None
 
 # =====================================================================
-# DISCORD & STATE (xóa ping ngay khi xanh + cooldown chống flap)
+# DISCORD & STATE
 # =====================================================================
 def load_state():
     msg_id, prev_state, owner_ping_id = None, {}, None
@@ -381,10 +372,10 @@ def check_and_ping(regions, prev_state):
         except Exception: pass
 
 # =====================================================================
-# MAIN LOOP - peek-only mặc định + goto thưa + máy trạng thái GREEN/SRV/CF/UNK
+# MAIN LOOP
 # =====================================================================
 def main():
-    print("🏁 v5.0 starting (DrissionPage Chrome-CDP, peek-only chống CF)")
+    print("🏁 v5.1 starting (DrissionPage Chrome-CDP, peek-only + FIX UNK chụp ảnh)")
     ensure_dirs()
     msg_id, prev_state, owner_ping_id = load_state()
     state = {'owner_ping_msg_id': owner_ping_id, 'last_cleared_ts': None}
@@ -409,6 +400,9 @@ def main():
     if mode == 'SRV':
         browser.screenshot_debug()
         print("🟠 Mở job đã thấy server Hanami 520/5xx -> CHỜ thụ động (log thôi, không ping).")
+    if mode == 'UNK':
+        browser.screenshot_debug()   # 🆕 v5.1: mở job đã UNK cũng phải có ảnh
+        print("❓ Mở job đã UNK -> chụp debug để soi trang lạ.")
     print(f"🧭 Mode khởi đầu: {mode} (goto đã dùng {real_goto_used}/{MAX_REAL_GOTO})")
 
     cf_restart_used = 0
@@ -430,7 +424,6 @@ def main():
             hhmm = vn_now.strftime('%H:%M')
             mins_since_goto += 1
 
-            # phát hiện browser chết CHỦ ĐỘNG (không đoán exception message)
             if not browser.is_really_alive():
                 print(f"💀 [{hhmm}] Browser chết (title fail) -> reopen...")
                 try: browser.close()
@@ -456,6 +449,8 @@ def main():
                 cf_clicked = False
                 if mode == 'CF':
                     browser.click_turnstile(); cf_clicked = True
+                if mode == 'UNK':
+                    browser.screenshot_debug()   # 🆕 v5.1
 
             regions = None
             via = "NONE"
@@ -464,7 +459,6 @@ def main():
 
             try:
                 if mode == 'GREEN':
-                    # peek-only mặc định; goto thưa mỗi REFRESH_EVERY_MIN để re-hydrate (chống stale)
                     if mins_since_goto >= REFRESH_EVERY_MIN and real_goto_used < MAX_REAL_GOTO:
                         print(f"🔁 [{hhmm}] goto re-hydrate thưa lần {real_goto_used+1}/{MAX_REAL_GOTO} (chống stale)")
                         browser.real_goto(TARGET_URL)
@@ -488,6 +482,7 @@ def main():
                         browser.click_turnstile(); cf_clicked = True
                     else:
                         mode, unk_min, srv_min, cf_min, cf_clicked = 'UNK', 1, 0, 0, False
+                        browser.screenshot_debug()   # 🆕 v5.1: GREEN->UNK lần đầu PHẢI chụp
                         print(f"❓ [{hhmm}] peek trả trang không rõ mặt -> chờ, quá {UNK_GIVEUP_MIN}p dừng êm.")
                 else:
                     peek = browser.peek_html()
@@ -533,10 +528,13 @@ def main():
                             cf_clicked = False
                             if mode == 'CF':
                                 browser.click_turnstile(); cf_clicked = True
+                            if mode == 'UNK':
+                                browser.screenshot_debug()   # 🆕 v5.1
                         else:
                             print(f"⏳ [{hhmm}] Kẹt CF {cf_min}/{CF_STUCK_RESTART_MIN}p (đã click, chờ tự nhả) -> KHÔNG reload.")
                     else:
                         mode, unk_min, srv_min, cf_min = 'UNK', unk_min + 1, 0, 0
+                        if unk_min == 1: browser.screenshot_debug()   # 🆕 v5.1: vừa chuyển vào UNK (từ SRV/CF) chụp lần đầu
                         if unk_min >= UNK_GIVEUP_MIN:
                             exit_reason = 'unk'
                             print(f"🛑 [{hhmm}] Trang không rõ mặt {unk_min}p -> bó tay, ping rồi dừng êm.")
