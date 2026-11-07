@@ -1,97 +1,76 @@
-name: run-relay
+name: UGPhone Relay Runner
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:   # chỉ chạy thủ công / relay; KHÔNG schedule (tránh song song đụng commit)
 
 permissions:
-  contents: write
+  contents: write      # bắt buộc để bot push file state ngược về repo
+
+concurrency:
+  group: ugphone-relay
+  cancel-in-progress: false   # job relay mới sẽ XẾP HÀNG chờ job hiện tại xong, không đá nhau
 
 jobs:
-  run-relay:
+  run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 360       # bot tự giới hạn 345p; chừa thời gian commit + trigger
 
     steps:
-    - name: Checkout code
+    - name: Checkout (bằng PAT để có quyền push)
       uses: actions/checkout@v4
       with:
-        token: ${{ secrets.PAT }}
+        token: ${{ secrets.PAT }}      # secret PAT: scope repo + workflow
+        fetch-depth: 0                 # full history để pull --rebase không lỗi shallow
 
     - name: Setup Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-        cache: 'pip'
 
-    - name: Install Chrome & Dependencies (Ubuntu 24.04 Compatible)
+    - name: Install Chrome + Xvfb + hệ thư viện (bản đã PASS drift_test)
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          google-chrome-stable \
-          xvfb \
-          libatk1.0-0 \
-          libatk-bridge2.0-0 \
-          libcairo2 \
-          libcups2 \
-          libdbus-1-3 \
-          libgdk-pixbuf-xlib-2.0-0 \
-          libgtk-3-0 \
-          libnspr4 \
-          libpango-1.0-0 \
-          libxss1 \
-          fonts-liberation \
-          libxdg-basedir1 \
-          libxkbcommon0 \
-          libxrandr2 \
-          libasound2t64 \
-          libatspi2.0-0
+          google-chrome-stable xvfb \
+          libatk1.0-0 libatk-bridge2.0-0 libcairo2 libcups2 libdbus-1-3 \
+          libgdk-pixbuf-xlib-2.0-0 libgtk-3-0 libnspr4 libpango-1.0-0 libxss1 \
+          fonts-liberation libxkbcommon0 libxrandr2 libasound2t64 libatspi2.0-0
+        # NOTE: KHÔNG còn bước 'python -m camoufox fetch' — v5.0 dùng Chrome/CDP, không Firefox.
 
-    - name: Install Python Packages
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+    - name: Install Python deps
+      run: pip install -r requirements.txt
 
-    - name: Pre-download Camoufox
-      run: python -m camoufox fetch
-
-    - name: Run 345-Minute Loop
-      run: xvfb-run --server-args="-screen 0 1280x1024x24" python -u long_runner.py
+    - name: Run 345-Minute Loop (headed Chrome qua Xvfb 1920x1080)
+      run: xvfb-run --server-args="-screen 0 1920x1080x24" python -u long_runner.py
       env:
         PYTHONUNBUFFERED: "1"
         DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         ROLE_PING_ID: ${{ secrets.ROLE_PING_ID }}
+        # ⚠️ CỐ Ý KHÔNG truyền OWNER_ID ở đây: nếu secret trống, env sẽ = "" (chuỗi rỗng),
+        #    làm code nhận "" thay vì default -> ping hỏng <@>. Cứ để code dùng default.
+        #    Nếu sau này muốn override qua secret, phải sửa dòng OWNER_ID trong long_runner.py
+        #    thành: os.environ.get('OWNER_ID') or '1160199218313564210'  rồi mới thêm env này.
 
-    - name: Commit State (Force Push nếu cần)
+    - name: Commit state ngược về repo (message_id / prev_state / owner_ping_id / debug)
       if: always()
       run: |
-        git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action"
-        git add data/
-        
+        git config user.name  "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add -A data/ || true
         if git diff --staged --quiet; then
-          echo "Không có thay đổi để commit"
-          exit 0
+          echo "Không có thay đổi state, bỏ qua commit."
+        else
+          git commit -m "chore(state): auto-update $(date -u +%FT%TZ) [skip ci]"
+          git pull --rebase origin "${{ github.ref_name }}" || true
+          git push --force-with-lease origin "HEAD:${{ github.ref_name }}"
         fi
-        
-        git commit -m "Relay: Save state at minute 345"
-        git push --force-with-lease origin main || {
-          echo "⚠️ Force push fail, thử reset và push lại..."
-          git fetch origin main
-          git reset --soft origin/main
-          git add data/
-          git commit -m "Relay: Save state (force)" || true
-          git push origin main
-        }
-      env:
-        GITHUB_TOKEN: ${{ secrets.PAT }}
 
-    - name: Trigger Next Runner
+    - name: Trigger job relay kế tiếp (24/7)
       if: always()
       run: |
-        echo "🚀 Đang trigger job tiếp theo..."
-        curl -L \
-          -X POST \
-          -H "Accept: application/vnd.github+json" \
+        CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
           -H "Authorization: Bearer ${{ secrets.PAT }}" \
-          https://api.github.com/repos/${{ github.repository }}/actions/workflows/runner.yml/dispatches \
-          -d '{"ref":"main"}'
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${{ github.repository }}/actions/workflows/runner.yml/dispatches" \
+          -d '{"ref":"${{ github.ref_name }}"}')
+        echo "Relay dispatch HTTP = $CODE (204 = đã kích job mới thành công)"
