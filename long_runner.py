@@ -18,7 +18,7 @@ ROLE_PING_ID = os.environ.get('ROLE_PING_ID')
 
 OWNER_ID = os.environ.get('OWNER_ID', '1160199218313564210')
 OWNER_PING_FAIL_THRESHOLD = 2      # lỗi NGHIÊM TRỌNG liên tiếp >= p này mới ping
-OWNER_PING_CLEAR_GREEN_MIN = 3     # 🆕 v4.10: chỉ xóa ping khi xanh LIÊN TỤC >= p này (chống chớp)
+OWNER_PING_COOLDOWN_S = 600        # 🆕 v4.11: sau khi xóa ping, chặn post lại trong 10p (chống flap)
 
 DURATION_MINUTES = 345
 PING_AUTO_DELETE = 300
@@ -208,6 +208,16 @@ JS_READ_OPTIONS = """() => {
   return out.join('\\n---SEP---\\n');
 }"""
 
+JS_GEO = """() => {
+  try {
+    return {
+      tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      lang: navigator.language,
+      langs: (navigator.languages || []).slice(0,3)
+    };
+  } catch(e) { return {tz:'?', lang:'?', langs:[]}; }
+}"""
+
 DEAD_MARKERS = (
     'target closed', 'target page, context or browser',
     'browser has been closed', 'no such window', 'connection refused',
@@ -224,7 +234,9 @@ class PatientBrowser:
         if not ensure_camoufox_installed():
             raise Exception("Camoufox chưa cài")
         from camoufox.sync_api import Camoufox
-        # LeakWarning canvas_noise = CẢNH BÁO vô hại, bot vẫn xanh. GIỮ mặc định (đóng băng).
+        # GIỮ NGUYÊN params (đóng băng). KHÔNG disable_coop, KHÔNG window=720.
+        # LeakWarning canvas_noise = CẢNH BÁO vô hại, bot vẫn xanh -> giữ mặc định.
+        # camoufox[geoip] (requirements) tự đồng bộ tz/locale fingerprint theo IP exit.
         self.cm = Camoufox(headless=False, humanize=True, block_images=False)
         self.browser = self.cm.__enter__()
         self.page = self.browser.new_page(viewport=VIEWPORT)
@@ -235,6 +247,14 @@ class PatientBrowser:
         self.page.set_default_timeout(30000)
         self.name = "Camoufox-Headful"
         print(f"✅ Browser {self.name} đã khởi động (viewport {VIEWPORT['width']}x{VIEWPORT['height']})")
+
+    def log_geo(self):
+        # 🆕 v4.11: in tz/locale để anh SOI fingerprint có khớp IP exit không (geoip effect?)
+        try:
+            g = self.page.evaluate(JS_GEO)
+            print(f"🌐 Fingerprint geo: tz={g.get('tz')} lang={g.get('lang')} langs={g.get('langs')}")
+        except Exception as e:
+            print(f"⚠️ log_geo bỏ qua: {e}")
 
     def real_goto(self, url):
         self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
@@ -438,6 +458,12 @@ def push_embed_error(summary, reason, fail_streak, msg_id=None):
 def post_owner_ping_once(state):
     if state['owner_ping_msg_id'] is not None:
         return  # đã treo 1 tin, không spam
+    now = time.time()
+    lc = state.get('last_cleared_ts')
+    # 🆕 v4.11: vừa xóa ping chưa lâu -> đang chớp, KHÔNG post lại (chống flap)
+    if lc is not None and (now - lc) < OWNER_PING_COOLDOWN_S:
+        print(f"⏸️ Bỏ qua ping (vừa xóa {int(now-lc)}s trước < cooldown {OWNER_PING_COOLDOWN_S}s) -> chống flap")
+        return
     content = (f"<@{OWNER_ID}> ⚠️ Bot đang bị lỗi rồi kìa, mau mau fix lỗi nhanh "
                f"để cho các ae biết server máy nào còn ‼️")
     if not WEBHOOK_URL:
@@ -449,24 +475,26 @@ def post_owner_ping_once(state):
             pid = r.json().get("id")
             if pid:
                 state['owner_ping_msg_id'] = pid
-                print(f"📣 Đã ping chủ (msg={pid}), GIỮ đến khi xanh ổn định")
+                print(f"📣 Đã ping chủ (msg={pid}), GIỮ đến khi xanh")
     except Exception as e:
         print(f"⚠️ Ping chủ lỗi: {e}")
 
-# 🆕 v4.10: CHỈ set None khi delete trả 2xx. Fail -> GIỮ id để nhịp sau retry,
-#           và guard is-not-None tự chặn post trùng -> hết spam + hết dangling.
+# 🆕 v4.11: xóa NGAY khi xanh (bỏ green_streak). Chỉ set None khi delete 2xx,
+#           và đánh dấu last_cleared_ts để post_owner_ping_once chống flap.
 def clear_owner_ping(state):
     pid = state['owner_ping_msg_id']
     if pid is None:
         return
     if not WEBHOOK_URL:
         state['owner_ping_msg_id'] = None
+        state['last_cleared_ts'] = time.time()
         return
     try:
         r = requests.delete(f"{WEBHOOK_URL}/messages/{pid}")
         if r.status_code in (200, 204):
             state['owner_ping_msg_id'] = None
-            print(f"🧹 Đã xóa tin ping chủ (msg={pid})")
+            state['last_cleared_ts'] = time.time()
+            print(f"🧹 Đã xóa tin ping chủ (msg={pid}) -> cooldown chống flap bắt đầu")
         else:
             print(f"⚠️ Xóa ping fail HTTP {r.status_code} -> GIỮ id để retry (không post trùng)")
     except Exception as e:
@@ -488,11 +516,11 @@ def check_and_ping(regions, prev_state):
 # MAIN LOOP
 # =====================================================================
 def main():
-    print("🏁 v4.10 starting")
+    print("🏁 v4.11 starting (geoip + xóa ping ngay khi xanh + cooldown chống flap)")
 
     ensure_dirs()
     msg_id, prev_state, owner_ping_id = load_state()
-    state = {'owner_ping_msg_id': owner_ping_id}
+    state = {'owner_ping_msg_id': owner_ping_id, 'last_cleared_ts': None}
     last_regions = prev_state if prev_state else {c: False for c in REGIONS}
 
     browser, ok = open_browser_real_goto()
@@ -500,6 +528,7 @@ def main():
         print("❌ Không mở được browser lần đầu. Kết thúc job êm (relay sau thử).")
         return
     real_goto_used = 1
+    browser.log_geo()   # 🆕 v4.11: soi fingerprint tz/locale vs IP exit
 
     try:
         init_peek = browser.peek_html()
@@ -525,7 +554,6 @@ def main():
     cf_restart_used = 0
     fail_streak = 0
     critical_fail_streak = 0
-    green_streak = 0                 # 🆕 v4.10: đếm xanh LIÊN TỤC để quyết định xóa ping
     reopen_count = 0
     last_minute_key = None
     start_time = time.time()
@@ -699,22 +727,18 @@ def main():
                     except Exception: pass
                     soft = True
 
-            # ===== KẾT QUẢ: XANH ổn định -> xóa ping; LỖI -> phân nghiêm-trọng vs tự-lo =====
+            # ===== KẾT QUẢ =====
             if regions is not None:
                 check_and_ping(regions, prev_state)
                 prev_state = regions
                 last_regions = regions
                 fail_streak = 0
                 critical_fail_streak = 0
-                green_streak += 1     # 🆕 v4.10
                 ket_qua = ", ".join(f"{c}: {bool(regions.get(c))}" for c in ['SG','HK','JP','DE','US'])
-                print(f"✅ Check [{hhmm}] ({via}): {ket_qua} | green_streak={green_streak}")
+                print(f"✅ Check [{hhmm}] ({via}): {ket_qua}")
                 msg_id = push_embed(last_regions, msg_id)
-                # 🆕 v4.10: chỉ xóa ping khi xanh LIÊN TỤC >= ngưỡng (chống xóa-post chớp)
-                if green_streak >= OWNER_PING_CLEAR_GREEN_MIN:
-                    clear_owner_ping(state)
+                clear_owner_ping(state)   # 🆕 v4.11: XÓA NGAY khi xanh (bỏ green_streak)
             else:
-                green_streak = 0      # 🆕 v4.10: lỗi xen vào -> reset đếm xanh
                 critical_now = (mode == 'UNK') or (mode == 'GREEN' and via in READ_FAIL_VIAS)
                 summary, reason = error_summary_reason(mode, via)
                 if critical_now:
@@ -723,7 +747,7 @@ def main():
                     print(f"❌ Fail [{fail_streak}] [{hhmm}] (mode={mode} CRITICAL) :: {summary} | {reason[:80]}")
                     msg_id = push_embed_error(summary, reason, fail_streak, msg_id)
                     if critical_fail_streak >= OWNER_PING_FAIL_THRESHOLD:
-                        post_owner_ping_once(state)
+                        post_owner_ping_once(state)   # bên trong check cooldown chống flap
                 elif mode == 'CF' and cf_min <= CF_GRACE_MIN:
                     print(f"⏳ [{hhmm}] CF thoáng qua (cf_min={cf_min}<={CF_GRACE_MIN}) -> giữ embed xanh, chưa tính fail.")
                     msg_id = push_embed(last_regions, msg_id)
@@ -735,7 +759,7 @@ def main():
                     msg_id = push_embed_error(summary, reason, fail_streak, msg_id)
 
             save_state(msg_id, last_regions, state['owner_ping_msg_id'])
-            print(f"🕐 Footer: {vn_now.strftime('%H:%M:%S')} (mode={mode} | chết:{reopen_count} | cf-ctx:{cf_restart_used} | goto:{real_goto_used}/{MAX_REAL_GOTO} | fetch-err:{fetch_err} | green:{green_streak} | ping:{'có' if state['owner_ping_msg_id'] else 'không'})")
+            print(f"🕐 Footer: {vn_now.strftime('%H:%M:%S')} (mode={mode} | chết:{reopen_count} | cf-ctx:{cf_restart_used} | goto:{real_goto_used}/{MAX_REAL_GOTO} | fetch-err:{fetch_err} | ping:{'có' if state['owner_ping_msg_id'] else 'không'})")
 
             if exit_reason:
                 break
