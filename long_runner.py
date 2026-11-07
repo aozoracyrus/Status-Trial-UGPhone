@@ -4,10 +4,9 @@ import time
 import re
 import requests
 import threading
-import subprocess
 from datetime import datetime
-from bs4 import BeautifulSoup
 import pytz
+from DrissionPage import ChromiumPage, ChromiumOptions
 
 # =====================================================================
 # CẤU HÌNH
@@ -18,28 +17,26 @@ ROLE_PING_ID = os.environ.get('ROLE_PING_ID')
 
 OWNER_ID = os.environ.get('OWNER_ID', '1160199218313564210')
 OWNER_PING_FAIL_THRESHOLD = 2      # lỗi NGHIÊM TRỌNG liên tiếp >= p này mới ping
-OWNER_PING_COOLDOWN_S = 600        # 🆕 v4.11: sau khi xóa ping, chặn post lại trong 10p (chống flap)
+OWNER_PING_COOLDOWN_S = 600        # sau khi xóa ping, chặn post lại 10p (chống flap)
 
 DURATION_MINUTES = 345
 PING_AUTO_DELETE = 300
-WAIT_AFTER_GOTO_MS = 12000
-WAIT_UI_TIMEOUT_MS = 15000
+WAIT_AFTER_GOTO_S = 12             # giây (DrissionPage page.wait() dùng GIÂY, không phải ms)
 UI_MARKER_TEXT = "Tạo máy UGPhone"
 
-FETCH_ERR_MARK = '__FETCH_ERR__'
-MAX_FETCH_ERR = 3
+# --- v5.0: peek-only mặc định (KHÔNG goto mỗi phút) + goto thưa chống stale ---
+REFRESH_EVERY_MIN = 10             # mỗi N phút goto 1 lần re-hydrate (PHỎNG ĐOÁN, verify bằng log)
+MAX_REAL_GOTO = 40                 # 345/10 ~= 35 -> chừa 40
 
 CF_STUCK_RESTART_MIN = 4
 CF_GRACE_MIN = 2
 MAX_CF_RESTART = 3
 CF_RESTART_COOLDOWN_S = 30
-MAX_REAL_GOTO = 6
 UNK_GIVEUP_MIN = 8
-
 MAX_BROWSER_REOPEN = 3
 REOPEN_COOLDOWN_S = 60
 
-READ_FAIL_VIAS = ('no-dropdown', 'incomplete', 'no-options')
+READ_FAIL_VIAS = ('incomplete', 'no-options')   # v5.0 bỏ 'no-dropdown' (không còn click dropdown)
 
 DATA_DIR = "data"
 DEBUG_DIR = os.path.join(DATA_DIR, "debug")
@@ -48,14 +45,14 @@ PREV_STATE_FILE = os.path.join(DATA_DIR, "prev_state.json")
 OWNER_PING_ID_FILE = os.path.join(DATA_DIR, "owner_ping_id.txt")
 DEBUG_SHOT = os.path.join(DEBUG_DIR, "last_error.png")
 
+# MỖI flag = 2 ký tự regional-indicator (U+1F1E6..U+1F1FF). ĐỪNG để cụt 1 ký tự.
 REGIONS = {
-    'SG': {'name': 'Singapore', 'flag': '🇸🇬'},
-    'HK': {'name': 'Hong Kong', 'flag': '🇭🇰'},
-    'JP': {'name': 'Japan', 'flag': '🇯🇵'},
-    'DE': {'name': 'Germany', 'flag': '🇩🇪'},
-    'US': {'name': 'America', 'flag': '🇺🇸'}
+    'SG': {'name': 'Singapore', 'flag': '🇸🇬'},  # U+1F1F8 U+1F1EC
+    'HK': {'name': 'Hong Kong',  'flag': '🇭🇰'},  # U+1F1ED U+1F1F0
+    'JP': {'name': 'Japan',       'flag': '🇯🇵'},  # U+1F1EF U+1F1F5
+    'DE': {'name': 'Germany',     'flag': '🇩🇪'},  # U+1F1E9 U+1F1EA
+    'US': {'name': 'America',     'flag': '🇺🇸'},  # U+1F1FA U+1F1F8
 }
-VIEWPORT = {'width': 1920, 'height': 1080}
 
 tz_vn = pytz.timezone('Asia/Ho_Chi_Minh')
 def get_time_24h():
@@ -66,16 +63,8 @@ def ensure_dirs():
         if not os.path.exists(d):
             os.makedirs(d)
 
-def ensure_camoufox_installed():
-    try:
-        r = subprocess.run(['python', '-m', 'camoufox', 'fetch'],
-                           capture_output=True, text=True, timeout=180)
-        return r.returncode == 0
-    except Exception:
-        return False
-
 # =====================================================================
-# PHÂN LOẠI (CHỈ DOM live / peek)
+# PHÂN LOẠI (CHỈ DOM live / page.html; TUYỆT ĐỐI không login/token)
 # =====================================================================
 def has_real_ui(html):
     return bool(html) and (UI_MARKER_TEXT.lower() in html.lower())
@@ -114,33 +103,31 @@ def error_summary_reason(mode, via):
                 "bot sẽ tự tiếp tục khi server sống lại.")
     if mode == 'CF':
         return ("Không cập nhật được trạng thái máy",
-                "Cloudflare đang yêu cầu xác minh con người và chưa nhả, "
-                "dù bot đã thử click widget xác minh.")
+                "Cloudflare đang yêu cầu xác minh con người và chưa nhả.")
     if mode == 'UNK':
         return ("Không cập nhật được trạng thái máy",
                 "Trang trả về nội dung lạ, bot chưa nhận diện được "
                 "(KHÔNG phải tường đăng nhập).")
-    if via == 'no-dropdown':
-        return ("Không đọc được danh sách khu vực",
-                "Trang vẫn mở nhưng bot không tìm thấy ô chọn khu vực để đọc.")
     if via == 'incomplete':
         return ("Thiếu dữ liệu một vài khu vực",
                 "Bot đọc được ô chọn nhưng thiếu chấm màu của một/vài khu vực.")
     if via == 'no-options':
         return ("Không đọc được danh sách khu vực",
-                "Bot mở được ô chọn nhưng không đọc được nội dung bên trong.")
+                "Bot thấy giao diện nhưng không parse ra đủ 5 khu vực.")
     return ("Không lấy được dữ liệu",
             f"Bot chưa xác định được nguyên nhân (mode={mode}, via={via}).")
 
 # =====================================================================
-# PARSE
+# PARSE (chạy trên string page.html, KHÔNG cần JS)
+#   Thứ tự ưu tiên: text VN -> 🟢 (còn) -> màu hết -> None (chưa rõ).
+#   KHÔNG có chuỗi rỗng '' trong list màu (lỗi cẩu thả đã sửa).
 # =====================================================================
 def _stock_of_text(t):
     low = t.lower()
     if 'có máy' in low or 'đang còn máy' in low: return True
     if 'hết máy' in low: return False
     if '🟢' in t: return True
-    if any(k in t for k in ['🔴', '', '🟠', '']): return False
+    if any(k in t for k in ['🔴', '🟥', '🟠', '⚪']): return False
     return None
 
 def parse_regions_from_text(text):
@@ -171,216 +158,103 @@ def regions_complete(regions):
     return regions is not None and all(v is not None for v in regions.values())
 
 # =====================================================================
-# JS
+# BROWSER WRAPPER (DrissionPage / Chrome-CDP) - CHỈ dùng API đã test chắc
 # =====================================================================
-JS_FETCH = """async (url) => {
-  try {
-    const r = await fetch(url + '?t=' + Date.now(), {credentials: 'include'});
-    return await r.text();
-  } catch (e) {
-    return '__FETCH_ERR__' + String(e);
-  }
-}"""
-
-JS_FIND_AND_CLICK = """() => {
-  let el = document.querySelector('select');
-  if (el) {
-    el.click();
-    el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
-    el.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
-    return { found: true, type: 'select' };
-  }
-  const all = document.querySelectorAll('*');
-  for (let i = 0; i < all.length; i++) {
-    if (all[i].textContent.includes('Singapore') && all[i].children.length < 5) {
-      all[i].click();
-      return { found: true, type: 'text-match' };
-    }
-  }
-  return { found: false };
-}"""
-
-JS_READ_OPTIONS = """() => {
-  const out = [];
-  document.querySelectorAll('select option, [role="option"], .dropdown-item, li').forEach(el => {
-    if (el.textContent.trim()) out.push(el.textContent.trim());
-  });
-  return out.join('\\n---SEP---\\n');
-}"""
-
-JS_GEO = """() => {
-  try {
-    return {
-      tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      lang: navigator.language,
-      langs: (navigator.languages || []).slice(0,3)
-    };
-  } catch(e) { return {tz:'?', lang:'?', langs:[]}; }
-}"""
-
-DEAD_MARKERS = (
-    'target closed', 'target page, context or browser',
-    'browser has been closed', 'no such window', 'connection refused',
-    'httpconnectionpool', 'net::err_connection')
-def _is_really_dead(e):
-    m = str(e).lower()
-    return any(k in m for k in DEAD_MARKERS)
-
-# =====================================================================
-# BROWSER
-# =====================================================================
-class PatientBrowser:
+class ChromeCDPBrowser:
     def __init__(self):
-        if not ensure_camoufox_installed():
-            raise Exception("Camoufox chưa cài")
-        from camoufox.sync_api import Camoufox
-        # GIỮ NGUYÊN params (đóng băng). KHÔNG disable_coop, KHÔNG window=720.
-        # LeakWarning canvas_noise = CẢNH BÁO vô hại, bot vẫn xanh -> giữ mặc định.
-        # camoufox[geoip] (requirements) tự đồng bộ tz/locale fingerprint theo IP exit.
-        self.cm = Camoufox(headless=False, humanize=True, block_images=False)
-        self.browser = self.cm.__enter__()
-        self.page = self.browser.new_page(viewport=VIEWPORT)
-        try:
-            self.page.set_viewport_size(VIEWPORT)
-        except Exception:
-            pass
-        self.page.set_default_timeout(30000)
-        self.name = "Camoufox-Headful"
-        print(f"✅ Browser {self.name} đã khởi động (viewport {VIEWPORT['width']}x{VIEWPORT['height']})")
-
-    def log_geo(self):
-        # 🆕 v4.11: in tz/locale để anh SOI fingerprint có khớp IP exit không (geoip effect?)
-        try:
-            g = self.page.evaluate(JS_GEO)
-            print(f"🌐 Fingerprint geo: tz={g.get('tz')} lang={g.get('lang')} langs={g.get('langs')}")
-        except Exception as e:
-            print(f"⚠️ log_geo bỏ qua: {e}")
+        opt = ChromiumOptions()
+        # headed mặc định (KHÔNG gọi headless()) -> cần Xvfb. KHÔNG set UA/window
+        # (để Chrome thật tự khai UA đúng version + Xvfb lo size) -> khớp drift_test PASS.
+        opt.set_argument('--no-sandbox')             # bắt buộc trong container GitHub
+        opt.set_argument('--disable-dev-shm-usage')  # /dev/shm nhỏ trên runner
+        opt.set_argument('--disable-gpu')            # Xvfb không GPU thật -> software render
+        self.page = ChromiumPage(opt)
+        self.name = "DrissionPage-ChromeCDP"
+        print(f"✅ Browser {self.name} đã khởi động (headed + CDP, Xvfb 1920x1080)")
 
     def real_goto(self, url):
-        self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        self.page.wait_for_timeout(WAIT_AFTER_GOTO_MS)
-
-    def fetch_html(self, url):
         try:
-            res = self.page.evaluate(JS_FETCH, url)
+            self.page.get(url)
+            self.page.wait(WAIT_AFTER_GOTO_S)
+            return True
         except Exception as e:
-            if _is_really_dead(e):
-                raise
-            return None
-        if isinstance(res, str) and res.startswith(FETCH_ERR_MARK):
-            return None
-        return res
+            print(f"❌ real_goto lỗi: {e}")
+            return False
 
     def peek_html(self):
+        """DOM live outerHTML (đã hydrate). Catch-all -> '' khi lỗi (mềm, KHÔNG raise)."""
         try:
-            return self.page.content()
+            return self.page.html or ""
         except Exception as e:
-            if _is_really_dead(e):
-                raise
+            print(f"⚠️ peek_html lỗi (coi như mềm): {e}")
             return ""
 
+    def parse_data(self):
+        """Parse 5 region thẳng từ page.html. Trả (regions|None, via)."""
+        html = self.peek_html()
+        if not html:
+            return None, 'no-options'
+        parsed = parse_regions_from_text(html)
+        if regions_complete(parsed):
+            return parsed, 'DOM'
+        if has_real_ui(html):
+            return None, 'incomplete'   # GREEN-mù (critical)
+        return None, 'no-options'
+
     def click_turnstile(self):
+        """Best-effort. Test chứng minh CF tự nhả không cần click -> fail ở đây VÔ HẠI."""
         sels = [
-            'iframe[src*="challenges.cloudflare.com"]',
-            'iframe[title*="Cloudflare"]',
-            '#cf-turnstile iframe',
-            'div[id*="turnstile"] iframe',
-            'iframe[name*="turnstile"]',
+            'css:iframe[src*="challenges.cloudflare.com"]',
+            'css:iframe[title*="Cloudflare"]',
+            'css:#cf-turnstile iframe',
+            'text:Verify you are human',
         ]
         for sel in sels:
             try:
-                el = self.page.query_selector(sel)
+                el = self.page.ele(sel, timeout=2)
                 if el:
-                    box = el.bounding_box()
-                    if box and box['width'] > 0:
-                        cx = box['x'] + box['width'] / 2
-                        cy = box['y'] + box['height'] / 2
-                        self.page.mouse.move(cx, cy)
-                        self.page.wait_for_timeout(300)
-                        self.page.mouse.click(cx, cy)
-                        print(f"🖱️ Đã click widget Turnstile ({sel})")
-                        self.page.wait_for_timeout(6000)
-                        return True
-            except Exception as e:
-                if _is_really_dead(e):
-                    raise
-                continue
-        try:
-            for kw in ('Verify you are human', 'verify', 'checkbox'):
-                loc = self.page.get_by_text(kw, exact=False).first
-                if loc and loc.is_visible():
-                    loc.click(timeout=3000)
-                    print(f"🖱️ Đã click text fallback '{kw}'")
-                    self.page.wait_for_timeout(6000)
+                    el.click()
+                    print(f"🖱️ Đã click widget ({sel})")
+                    self.page.wait(6)
                     return True
-        except Exception:
-            pass
-        print("ℹ️ Không thấy widget Turnstile để click (có thể non-interactive, chờ tự nhả)")
+            except Exception:
+                continue
+        print("ℹ️ Không click được widget (managed-auto, chờ tự nhả) -> vô hại")
         return False
-
-    def click_dropdown(self):
-        try:
-            return self.page.evaluate(JS_FIND_AND_CLICK)
-        except Exception as e:
-            if _is_really_dead(e):
-                raise
-            return None
-
-    def read_options(self):
-        try:
-            return self.page.evaluate(JS_READ_OPTIONS)
-        except Exception as e:
-            if _is_really_dead(e):
-                raise
-            return None
 
     def screenshot_debug(self):
         try:
             ensure_dirs()
-            self.page.screenshot(path=DEBUG_SHOT, full_page=True)
+            self.page.get_screenshot(path=DEBUG_SHOT)
             print(f"📸 Đã chụp debug -> {DEBUG_SHOT}")
         except Exception as e:
             print(f"⚠️ Chụp debug thất bại: {e}")
 
     def is_really_alive(self):
+        """Thử đọc title. Browser chết -> raise -> False. Trang CF verify -> title tồn tại -> True."""
         try:
-            _ = self.page.title()
+            _ = self.page.title
             return True
-        except Exception as e:
-            return not _is_really_dead(e)
+        except Exception:
+            return False
 
     def close(self):
-        try: self.cm.__exit__(None, None, None)
+        try: self.page.quit()
         except Exception: pass
 
-def open_browser_real_goto():
+def open_browser():
     try:
-        b = PatientBrowser()
-        b.real_goto(TARGET_URL)
-        return b, True
+        b = ChromeCDPBrowser()
+        if not b.real_goto(TARGET_URL):
+            b.close()
+            return None
+        return b
     except Exception as e:
         print(f"❌ Mở browser lỗi: {e}")
-        return None, False
-
-def read_via_fetch_or_dom(browser, html_from_fetch):
-    if html_from_fetch:
-        parsed = parse_regions_from_text(html_from_fetch)
-        if regions_complete(parsed):
-            return parsed, 'FETCH'
-    click_res = browser.click_dropdown()
-    if not click_res or not click_res.get('found'):
-        return None, 'no-dropdown'
-    browser.page.wait_for_timeout(2000)
-    options = browser.read_options()
-    if options and len(options) > 10:
-        parsed = parse_regions_from_text(options)
-        if regions_complete(parsed):
-            return parsed, 'DOM'
-        return None, 'incomplete'
-    return None, 'no-options'
+        return None
 
 # =====================================================================
-# DISCORD & STATE
+# DISCORD & STATE (xóa ping ngay khi xanh + cooldown chống flap)
 # =====================================================================
 def load_state():
     msg_id, prev_state, owner_ping_id = None, {}, None
@@ -420,12 +294,9 @@ def build_embed_error(summary, reason, fail_streak):
     desc = (f"🚨 **Đang gặp lỗi:** {summary}\n"
             f"🤔 **Lí do:** {reason}\n"
             f"🛠️ Chúng tôi sẽ tìm ra nguyên nhân và cố gắng sửa chữa lỗi đang gặp phải.")
-    return {
-        "title": "📱 Trạng thái UGPhone Trial",
-        "color": 0xed4245,
-        "description": desc,
-        "footer": {"text": f"Uptime: {get_time_24h()} | Fail liên tiếp: {fail_streak}p"},
-    }
+    return {"title": "📱 Trạng thái UGPhone Trial", "color": 0xed4245,
+            "description": desc,
+            "footer": {"text": f"Uptime: {get_time_24h()} | Fail liên tiếp: {fail_streak}p"}}
 
 def push_embed(regions, msg_id=None):
     if not WEBHOOK_URL: return None
@@ -457,10 +328,9 @@ def push_embed_error(summary, reason, fail_streak, msg_id=None):
 
 def post_owner_ping_once(state):
     if state['owner_ping_msg_id'] is not None:
-        return  # đã treo 1 tin, không spam
+        return
     now = time.time()
     lc = state.get('last_cleared_ts')
-    # 🆕 v4.11: vừa xóa ping chưa lâu -> đang chớp, KHÔNG post lại (chống flap)
     if lc is not None and (now - lc) < OWNER_PING_COOLDOWN_S:
         print(f"⏸️ Bỏ qua ping (vừa xóa {int(now-lc)}s trước < cooldown {OWNER_PING_COOLDOWN_S}s) -> chống flap")
         return
@@ -479,8 +349,6 @@ def post_owner_ping_once(state):
     except Exception as e:
         print(f"⚠️ Ping chủ lỗi: {e}")
 
-# 🆕 v4.11: xóa NGAY khi xanh (bỏ green_streak). Chỉ set None khi delete 2xx,
-#           và đánh dấu last_cleared_ts để post_owner_ping_once chống flap.
 def clear_owner_ping(state):
     pid = state['owner_ping_msg_id']
     if pid is None:
@@ -513,39 +381,31 @@ def check_and_ping(regions, prev_state):
         except Exception: pass
 
 # =====================================================================
-# MAIN LOOP
+# MAIN LOOP - peek-only mặc định + goto thưa + máy trạng thái GREEN/SRV/CF/UNK
 # =====================================================================
 def main():
-    print("🏁 v4.11 starting (geoip + xóa ping ngay khi xanh + cooldown chống flap)")
-
+    print("🏁 v5.0 starting (DrissionPage Chrome-CDP, peek-only chống CF)")
     ensure_dirs()
     msg_id, prev_state, owner_ping_id = load_state()
     state = {'owner_ping_msg_id': owner_ping_id, 'last_cleared_ts': None}
     last_regions = prev_state if prev_state else {c: False for c in REGIONS}
 
-    browser, ok = open_browser_real_goto()
+    browser = open_browser()
     if not browser:
         print("❌ Không mở được browser lần đầu. Kết thúc job êm (relay sau thử).")
         return
     real_goto_used = 1
-    browser.log_geo()   # 🆕 v4.11: soi fingerprint tz/locale vs IP exit
+    mins_since_goto = 0
 
-    try:
-        init_peek = browser.peek_html()
-    except Exception as e:
-        if _is_really_dead(e):
-            print("💀 Browser chết ngay lúc mở. Kết thúc job êm."); return
-        init_peek = ""
-    mode = classify(init_peek)
+    mode = classify(browser.peek_html())
     cf_min = 1 if mode == 'CF' else 0
     srv_min = 1 if mode == 'SRV' else 0
     unk_min = 1 if mode == 'UNK' else 0
     cf_clicked = False
-    fetch_err = 0
     if mode == 'CF':
         browser.click_turnstile(); cf_clicked = True
-        try: mode = classify(browser.peek_html())
-        except Exception: pass
+        mode = classify(browser.peek_html())
+        cf_min = 1 if mode == 'CF' else 0
     if mode == 'SRV':
         browser.screenshot_debug()
         print("🟠 Mở job đã thấy server Hanami 520/5xx -> CHỜ thụ động (log thôi, không ping).")
@@ -568,86 +428,81 @@ def main():
                 continue
             last_minute_key = minute_key
             hhmm = vn_now.strftime('%H:%M')
+            mins_since_goto += 1
+
+            # phát hiện browser chết CHỦ ĐỘNG (không đoán exception message)
+            if not browser.is_really_alive():
+                print(f"💀 [{hhmm}] Browser chết (title fail) -> reopen...")
+                try: browser.close()
+                except Exception: pass
+                reopen_count += 1
+                if reopen_count > MAX_BROWSER_REOPEN:
+                    exit_reason = 'dead'
+                    print(f"🛑 Reopen {reopen_count} lần (quá {MAX_BROWSER_REOPEN}) -> bó tay, ping rồi dừng êm.")
+                    post_owner_ping_once(state)
+                    break
+                time.sleep(REOPEN_COOLDOWN_S)
+                browser = open_browser()
+                if not browser:
+                    exit_reason = 'open-fail'
+                    print("❌ Reopen thất bại -> bó tay, ping rồi dừng êm.")
+                    post_owner_ping_once(state)
+                    break
+                real_goto_used += 1; mins_since_goto = 0
+                mode = classify(browser.peek_html())
+                cf_min = 1 if mode == 'CF' else 0
+                srv_min = 1 if mode == 'SRV' else 0
+                unk_min = 1 if mode == 'UNK' else 0
+                cf_clicked = False
+                if mode == 'CF':
+                    browser.click_turnstile(); cf_clicked = True
 
             regions = None
             via = "NONE"
-            soft = False
             summary = None
             reason = None
 
             try:
                 if mode == 'GREEN':
-                    html = browser.fetch_html(TARGET_URL)
-                    if html is None:
-                        fetch_err += 1
-                        print(f"⚠️ [{hhmm}] fetch lỗi (lần {fetch_err}/{MAX_FETCH_ERR}) -> giữ browser, phút sau thử lại.")
-                        soft = True
-                        if fetch_err >= MAX_FETCH_ERR:
-                            if real_goto_used >= MAX_REAL_GOTO:
-                                exit_reason = 'goto-cap'
-                                print(f"🛑 [{hhmm}] fetch lỗi liên tiếp + hết suất goto -> bó tay, ping chủ rồi dừng êm.")
-                                post_owner_ping_once(state)
-                                break
-                            real_goto_used += 1
-                            print(f"🔄 [{hhmm}] fetch lỗi {fetch_err} lần -> goto reset lần {real_goto_used}/{MAX_REAL_GOTO}")
-                            browser.real_goto(TARGET_URL)
-                            fetch_err = 0
-                            try: mode = classify(browser.peek_html())
-                            except Exception: mode = 'UNK'
-                            cf_min = 1 if mode == 'CF' else 0
-                            srv_min = 1 if mode == 'SRV' else 0
-                            unk_min = 1 if mode == 'UNK' else 0
-                            cf_clicked = False
-                            if mode == 'CF':
-                                browser.click_turnstile(); cf_clicked = True
+                    # peek-only mặc định; goto thưa mỗi REFRESH_EVERY_MIN để re-hydrate (chống stale)
+                    if mins_since_goto >= REFRESH_EVERY_MIN and real_goto_used < MAX_REAL_GOTO:
+                        print(f"🔁 [{hhmm}] goto re-hydrate thưa lần {real_goto_used+1}/{MAX_REAL_GOTO} (chống stale)")
+                        browser.real_goto(TARGET_URL)
+                        real_goto_used += 1; mins_since_goto = 0
+                    peek = browser.peek_html()
+                    nm = classify(peek)
+                    if nm == 'GREEN':
+                        regions, via = browser.parse_data()
+                        if regions is None:
+                            summary, reason = error_summary_reason('GREEN', via)
+                            browser.screenshot_debug()
+                            print(f"⚠️ [{hhmm}] GREEN nhưng parse thiếu ({via}) -> critical, giữ browser.")
+                    elif nm == 'SRV':
+                        mode, srv_min, cf_min, unk_min, cf_clicked = 'SRV', 1, 0, 0, False
+                        browser.screenshot_debug()
+                        print(f"🟠 [{hhmm}] Server Hanami 520/5xx -> CHỜ thụ động.")
+                    elif nm == 'CF':
+                        mode, cf_min, srv_min, unk_min, cf_clicked = 'CF', 1, 0, 0, False
+                        browser.screenshot_debug()
+                        print(f"🟡 [{hhmm}] Rơi vào CF verify -> click best-effort rồi chờ tự nhả.")
+                        browser.click_turnstile(); cf_clicked = True
                     else:
-                        fetch_err = 0
-                        parsed_direct = parse_regions_from_text(html)
-                        if regions_complete(parsed_direct):
-                            regions, via = parsed_direct, 'FETCH'
-                        else:
-                            try:
-                                dom = browser.peek_html()
-                            except Exception as e:
-                                if _is_really_dead(e):
-                                    raise
-                                dom = ""
-                            nm = classify(dom)
-                            if nm == 'GREEN':
-                                regions, via = read_via_fetch_or_dom(browser, dom)
-                                if regions is None:
-                                    soft = True
-                                    browser.screenshot_debug()
-                                    print(f"⚠️ [{hhmm}] DOM xanh nhưng đọc data fail ({via}) -> giữ browser, phút sau thử lại.")
-                            elif nm == 'SRV':
-                                mode, srv_min, cf_min, unk_min, cf_clicked = 'SRV', 1, 0, 0, False
-                                browser.screenshot_debug()
-                                print(f"🟠 [{hhmm}] Server Hanami 520/5xx (DOM live) -> CHỜ thụ động.")
-                                soft = True
-                            elif nm == 'CF':
-                                mode, cf_min, srv_min, unk_min, cf_clicked = 'CF', 1, 0, 0, False
-                                browser.screenshot_debug()
-                                print(f"🟡 [{hhmm}] DOM live = trang verify THẬT -> click widget 1 lần rồi chờ.")
-                                browser.click_turnstile(); cf_clicked = True
-                                soft = True
-                            else:
-                                mode, unk_min, srv_min, cf_min, cf_clicked = 'UNK', 1, 0, 0, False
-                                print(f"❓ [{hhmm}] DOM live không rõ mặt -> chờ, quá {UNK_GIVEUP_MIN}p dừng êm.")
-                                soft = True
+                        mode, unk_min, srv_min, cf_min, cf_clicked = 'UNK', 1, 0, 0, False
+                        print(f"❓ [{hhmm}] peek trả trang không rõ mặt -> chờ, quá {UNK_GIVEUP_MIN}p dừng êm.")
                 else:
                     peek = browser.peek_html()
                     nm = classify(peek)
                     if nm == 'GREEN':
-                        print(f"✅ [{hhmm}] Hồi phục về GREEN (mode cũ={mode}) -> đọc data từ DOM live.")
-                        mode = 'GREEN'; cf_min = srv_min = unk_min = 0; cf_clicked = False; fetch_err = 0
-                        regions, via = read_via_fetch_or_dom(browser, peek)
+                        print(f"✅ [{hhmm}] Hồi phục về GREEN (mode cũ={mode}) -> parse data.")
+                        mode = 'GREEN'; cf_min = srv_min = unk_min = 0; cf_clicked = False; mins_since_goto = 0
+                        regions, via = browser.parse_data()
                         if regions is None:
-                            soft = True; browser.screenshot_debug()
+                            summary, reason = error_summary_reason('GREEN', via)
+                            browser.screenshot_debug()
                     elif nm == 'SRV':
                         mode, srv_min, cf_min, unk_min = 'SRV', srv_min + 1, 0, 0
                         if srv_min == 1: browser.screenshot_debug()
-                        print(f"🟠 [{hhmm}] Server Hanami 520/5xx (phút thứ {srv_min}) -> chờ thụ động, KHÔNG reload/đổi runner.")
-                        soft = True
+                        print(f"🟠 [{hhmm}] Server Hanami 520/5xx (phút thứ {srv_min}) -> chờ thụ động, KHÔNG reload.")
                     elif nm == 'CF':
                         mode, cf_min, srv_min, unk_min = 'CF', cf_min + 1, 0, 0
                         if cf_min == 1: browser.screenshot_debug()
@@ -656,76 +511,42 @@ def main():
                         if cf_min >= CF_STUCK_RESTART_MIN:
                             if cf_restart_used >= MAX_CF_RESTART or real_goto_used >= MAX_REAL_GOTO:
                                 exit_reason = 'cf'
-                                print(f"🛑 [{hhmm}] Kẹt CF {cf_min}p (ctx {cf_restart_used}/{MAX_CF_RESTART}, goto {real_goto_used}/{MAX_REAL_GOTO}) -> bó tay, ping chủ rồi dừng êm.")
+                                print(f"🛑 [{hhmm}] Kẹt CF {cf_min}p (ctx {cf_restart_used}/{MAX_CF_RESTART}, goto {real_goto_used}/{MAX_REAL_GOTO}) -> bó tay, ping rồi dừng êm.")
                                 post_owner_ping_once(state)
                                 break
                             cf_restart_used += 1; real_goto_used += 1
-                            print(f"🔄 [{hhmm}] Kẹt CF {cf_min}p (đã click vẫn chưa nhả) -> goto reset context lần {cf_restart_used}/{MAX_CF_RESTART} (goto {real_goto_used}/{MAX_REAL_GOTO}, cooldown {CF_RESTART_COOLDOWN_S}s)")
+                            print(f"🔄 [{hhmm}] Kẹt CF {cf_min}p -> mở context Chrome mới lần {cf_restart_used}/{MAX_CF_RESTART} (cooldown {CF_RESTART_COOLDOWN_S}s)")
                             try: browser.close()
                             except Exception: pass
                             time.sleep(CF_RESTART_COOLDOWN_S)
-                            browser, ok = open_browser_real_goto()
+                            browser = open_browser()
                             if not browser:
                                 exit_reason = 'open-fail'
-                                print("❌ Mở context mới thất bại -> bó tay, ping chủ rồi dừng êm.")
+                                print("❌ Mở context mới thất bại -> bó tay, ping rồi dừng êm.")
                                 post_owner_ping_once(state)
                                 break
-                            try: pk = browser.peek_html()
-                            except Exception: pk = ""
-                            mode = classify(pk)
+                            mins_since_goto = 0
+                            mode = classify(browser.peek_html())
                             cf_min = 1 if mode == 'CF' else 0
                             srv_min = 1 if mode == 'SRV' else 0
                             unk_min = 1 if mode == 'UNK' else 0
                             cf_clicked = False
                             if mode == 'CF':
                                 browser.click_turnstile(); cf_clicked = True
-                            soft = True
                         else:
-                            print(f"⏳ [{hhmm}] Kẹt CF {cf_min}/{CF_STUCK_RESTART_MIN}p (đã click widget, chờ tự nhả) -> KHÔNG reload.")
-                            soft = True
+                            print(f"⏳ [{hhmm}] Kẹt CF {cf_min}/{CF_STUCK_RESTART_MIN}p (đã click, chờ tự nhả) -> KHÔNG reload.")
                     else:
                         mode, unk_min, srv_min, cf_min = 'UNK', unk_min + 1, 0, 0
                         if unk_min >= UNK_GIVEUP_MIN:
                             exit_reason = 'unk'
-                            print(f"🛑 [{hhmm}] Trang không rõ mặt {unk_min}p -> bó tay, ping chủ rồi dừng êm.")
+                            print(f"🛑 [{hhmm}] Trang không rõ mặt {unk_min}p -> bó tay, ping rồi dừng êm.")
                             post_owner_ping_once(state)
                             break
-                        print(f"❓ [{hhmm}] Trang không rõ mặt {unk_min}/{UNK_GIVEUP_MIN}p -> chờ thụ động, không mở ctx (tránh đoán mò).")
-                        soft = True
+                        print(f"❓ [{hhmm}] Trang không rõ mặt {unk_min}/{UNK_GIVEUP_MIN}p -> chờ thụ động.")
             except Exception as e:
-                if _is_really_dead(e):
-                    print(f"💀 [{hhmm}] Browser chết thật: {str(e)[:80]}...")
-                    try: browser.close()
-                    except Exception: pass
-                    reopen_count += 1
-                    if reopen_count > MAX_BROWSER_REOPEN or real_goto_used >= MAX_REAL_GOTO:
-                        exit_reason = 'dead'
-                        print(f"🛑 Chết thật {reopen_count} lần / hết suất goto -> bó tay, ping chủ rồi dừng êm.")
-                        post_owner_ping_once(state)
-                        break
-                    real_goto_used += 1
-                    time.sleep(REOPEN_COOLDOWN_S)
-                    browser, ok = open_browser_real_goto()
-                    if not browser:
-                        exit_reason = 'open-fail'
-                        print("❌ Mở lại thất bại -> bó tay, ping chủ rồi dừng êm.")
-                        post_owner_ping_once(state)
-                        break
-                    try: pk = browser.peek_html()
-                    except Exception: pk = ""
-                    mode = classify(pk)
-                    cf_min = 1 if mode == 'CF' else 0
-                    srv_min = 1 if mode == 'SRV' else 0
-                    unk_min = 1 if mode == 'UNK' else 0
-                    cf_clicked = False; fetch_err = 0
-                    if mode == 'CF':
-                        browser.click_turnstile(); cf_clicked = True
-                    soft = True
-                else:
-                    print(f"⚠️ [{hhmm}] Lỗi mềm: {e} -> chụp debug, giữ browser/mode.")
-                    try: browser.screenshot_debug()
-                    except Exception: pass
-                    soft = True
+                print(f"⚠️ [{hhmm}] Lỗi mềm ngoài dự kiến: {e} -> chụp debug, giữ browser/mode.")
+                try: browser.screenshot_debug()
+                except Exception: pass
 
             # ===== KẾT QUẢ =====
             if regions is not None:
@@ -737,17 +558,18 @@ def main():
                 ket_qua = ", ".join(f"{c}: {bool(regions.get(c))}" for c in ['SG','HK','JP','DE','US'])
                 print(f"✅ Check [{hhmm}] ({via}): {ket_qua}")
                 msg_id = push_embed(last_regions, msg_id)
-                clear_owner_ping(state)   # 🆕 v4.11: XÓA NGAY khi xanh (bỏ green_streak)
+                clear_owner_ping(state)
             else:
+                if summary is None:
+                    summary, reason = error_summary_reason(mode, via)
                 critical_now = (mode == 'UNK') or (mode == 'GREEN' and via in READ_FAIL_VIAS)
-                summary, reason = error_summary_reason(mode, via)
                 if critical_now:
                     fail_streak += 1
                     critical_fail_streak += 1
                     print(f"❌ Fail [{fail_streak}] [{hhmm}] (mode={mode} CRITICAL) :: {summary} | {reason[:80]}")
                     msg_id = push_embed_error(summary, reason, fail_streak, msg_id)
                     if critical_fail_streak >= OWNER_PING_FAIL_THRESHOLD:
-                        post_owner_ping_once(state)   # bên trong check cooldown chống flap
+                        post_owner_ping_once(state)
                 elif mode == 'CF' and cf_min <= CF_GRACE_MIN:
                     print(f"⏳ [{hhmm}] CF thoáng qua (cf_min={cf_min}<={CF_GRACE_MIN}) -> giữ embed xanh, chưa tính fail.")
                     msg_id = push_embed(last_regions, msg_id)
@@ -759,7 +581,7 @@ def main():
                     msg_id = push_embed_error(summary, reason, fail_streak, msg_id)
 
             save_state(msg_id, last_regions, state['owner_ping_msg_id'])
-            print(f"🕐 Footer: {vn_now.strftime('%H:%M:%S')} (mode={mode} | chết:{reopen_count} | cf-ctx:{cf_restart_used} | goto:{real_goto_used}/{MAX_REAL_GOTO} | fetch-err:{fetch_err} | ping:{'có' if state['owner_ping_msg_id'] else 'không'})")
+            print(f"🕐 Footer: {vn_now.strftime('%H:%M:%S')} (mode={mode} | reopen:{reopen_count} | cf-ctx:{cf_restart_used} | goto:{real_goto_used}/{MAX_REAL_GOTO} | since_goto:{mins_since_goto} | ping:{'có' if state['owner_ping_msg_id'] else 'không'})")
 
             if exit_reason:
                 break
@@ -771,7 +593,7 @@ def main():
         if browser:
             try: browser.close()
             except Exception: pass
-        print(f"⏰ Kết thúc job. reason={exit_reason or 'hết 345p'} (chết:{reopen_count} cf-ctx:{cf_restart_used} goto:{real_goto_used})")
+        print(f"⏰ Kết thúc job. reason={exit_reason or 'hết 345p'} (reopen:{reopen_count} cf-ctx:{cf_restart_used} goto:{real_goto_used})")
 
 if __name__ == "__main__":
     main()
