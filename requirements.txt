@@ -1,4 +1,4 @@
-camoufox[geoip]
+DrissionPage
 beautifulsoup4
 requests
 pytz
