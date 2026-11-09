@@ -372,68 +372,56 @@ của GitHub (anti-console kick) được xử lý bằng recovery + nhường j
 mới, không cần VPS.
 
 **❓ UNK là gì, có phải bị chặn đăng nhập không?**
-→ **KHÔNG.** Ảnh debug thật cho     WAIT_AFTER_GOTO_MS = 12000        # 🧊 CẤM giảm: chờ Xvfb + Turnstile tự verify
-    WAIT_UI_TIMEOUT_MS = 15000        # 🧊 CẤM giảm: tối đa đợi UI thật
-    UI_MARKER_TEXT = "Tạo máy UGPhone"  # Mốc nhận diện UI THẬT
-    VIEWPORT = {'width': 1920, 'height': 1080}  # 🧊 CẤM đổi: phải khớp Xvfb
-    FAIL_ALERT_THRESHOLD = 10         # Fail bao nhiêu phút thì alert (KHÔNG restart)
-    MAX_BROWSER_REOPEN = 3            # Chỉ áp dụng khi browser CHẾT THẬT
-    REOPEN_COOLDOWN_S = 60            # Chờ IP nguội trước khi mở lại (khi chết thật)
-    PING_AUTO_DELETE = 300            # Tự xóa tin ping sau (giây)
+→ **KHÔNG.** Ảnh debug thật cho thấy UNK = bot bị đá về trang **Dashboard gốc**
+("Đăng nhập để xem Dashboard"), do anti-console/idle-guard của site, KHÔNG phải
+login wall. Bot không cần login. v5.3 chữa bằng recovery goto ép về buydevice.
+Đừng thêm check login — đó chính là bệnh v3.x đã giết bot nhiều lần.
 
-Workflow — step chạy bot (Xvfb screen phải = VIEWPORT):
+**❓ Cloudflare có cần click / cần solver không?**
+→ **KHÔNG.** CF ở đây là managed-auto, trang "Verifying you are human" hiện ~7s
+rồi **tự nhả**, không có checkbox/widget. Code `click_turnstile` là best-effort,
+thường in "Không thấy widget" — BÌNH THƯỜNG. Không cần CapSolver/Anti-Captcha,
+không cần residential proxy (datacenter vô tội: Proton/VPS/Chrome thường đều vào).
 
-    - name: Run 345-Minute Loop
-      run: xvfb-run --server-args="-screen 0 1920x1080x24" python -u long_runner.py
-      env:
-        PYTHONUNBUFFERED: "1"
-        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        ROLE_PING_ID: ${{ secrets.ROLE_PING_ID }}
+**❓ peek-only có làm data stale (cũ) không?**
+→ **CÂU HỎI MỞ — chủ repo chưa chốt dứt điểm.** peek-only đọc DOM đã hydrate;
+nếu SPA Hanami TỰ poll API nội bộ thì data luôn fresh, goto-thừa là thừa. Nếu
+SPA KHÔNG tự poll thì data đứng im tới lần goto-thừa kế (10p). v5.3 GIỮ
+goto-thừa mỗi 10p như lưới an toàn, nhưng goto cũng là 1 trigger bị đá về
+Dashboard (đã có recovery). **Ai fork/duy trì:** mở web thật, xem dot màu có tự
+đổi mà bot không thấy không — đổi → giữ goto-thừa; không đổi → có thể bỏ
+goto-thừa (`REFRESH_EVERY_MIN` đặt rất lớn) để giảm risk redirect. Đừng tự bỏ
+khi chưa kiểm chứng — đó là bài học geoip (em từng đoán mò, log chứng minh vô dụng).
 
----
+**❓ Sao bot không ping khi kẹt CF / server nghỉ?**
+→ Vì đó là bệnh **bot tự lo được**: CF tự nhả ~7s (grace nuốt flicker), SRV là
+Hanami nghỉ (anh có fix cũng vô ích, bot chờ). Chỉ lỗi **nghiêm trọng dai dẳng**
+(bot bó tay: UNK recovery fail / GREEN-mù / Chrome chết hết suất) mới réo chủ.
+Nguyên tắc: đừng làm phiền chủ cho chuyện bot tự chữa được.
 
-## ❓ FAQ
+**❓ Tin ping chủ sao không biến mất sau 5 phút như role ping?**
+→ Vì vòng đời nó KHÁC. Role ping = báo sự kiện (máy vừa xuất hiện) → xóa 5p cho
+sạch kênh. Owner ping = báo TÌNH TRẠNG lỗi → phải TREO SUỐT lúc embed đỏ, chỉ
+xóa khi bot XANH lại (đúng ý chủ). Cooldown 10p chống spam khi bot dao động chớp.
 
-**❓ Sao bot không check login cho "chắc"?**
-→ Vì trang **không cần login**. Check login ở v3.x là false positive: nó đọc nhầm
-text placeholder/hướng dẫn thành "login wall", đá panic restart, restart dồn dập làm
-Cloudflare khóa IP (timeout 90s). Xóa check đó = hết bệnh. Đây là bài học đắt nhất
-của dự án.
+**❓ Repo private chạy được không? / Có ping mỗi phút không? / Chạy cron được không?**
+→ Private chỉ 2.000 phút/tháng (Public = không giới hạn). Chỉ ping khi khu vực
+hết → còn máy (so `prev_state.json`). Không chạy cron (xung đột commit); chỉ
+**Run workflow** để khởi động chuỗi relay.
 
-**❓ Sao phải headful mà không headless cho nhẹ?**
-→ Headless để lộ fingerprint automation -> server trả login wall GIẢ để đá. Headful
-trên Xvfb 1920x1080 thì Turnstile coi là người thật và tự pass. RAM headful Firefox
-~500-700MB, runner GitHub 7GB -> dư sức.
-
-**❓ Viewport 1920x1080 có bắt buộc không?**
-→ Có, và phải khớp Xvfb screen. Lệch độ phân giải là toạ độ click Turnstile sai ->
-challenge không pass.
-
-**❓ IP datacenter có bị chặn không?**
-→ Không. Đã chứng minh: Proton VPN (datacenter) và VPS (datacenter) đều vào được.
-Vấn đề chưa bao giờ là IP, mà là fingerprint browser + logic panic tự hủy.
-
-**❓ Repo private chạy được không?**
-→ Được nhưng chỉ 2.000 phút/tháng. Repo **Public** = không giới hạn.
-
-**❓ Có ping role mỗi phút không?**
-→ Không. Chỉ ping khi một khu vực chuyển **hết máy -> còn máy** (so `prev_state.json`).
-
-**❓ Làm sao biết bot đang healthy?**
-→ Log có `reopen thật: 0` và `✅ Check [HH:MM] (DROPDOWN): SG: True, ...`. `reopen: 0`
-nghĩa là browser không bị đóng/mở lần nào = Turnstile tự pass, không panic.
-
-**❓ Có chạy cron/schedule được không?**
-→ Không nên. Cron chạy song song gây xung đột commit. Chỉ dùng **Run workflow** để
-khởi động chuỗi relay.
+**❓ Làm sao biết bot healthy ở v5.3?**
+→ Log xen kẽ `✅ Check [...] (DOM)` mỗi phút; khi site đá về Dashboard thì thấy
+`↩️ Recovery ... -> GREEN` (bot tự cure, không ping); khi CF chen thì `⏳ CF
+thoáng qua` rồi xanh lại. Footer có `recovery:n/40` cho biết bot đã phải kéo về
+bao nhiêu lần. KHÔNG thấy streak vô hạn, KHÔNG thấy `🟡 CF` lặp như bản Camoufox.
 
 ---
 
 ## ⚖️ Tuyên bố miễn trừ
 
-Dự án phục vụ mục đích **học tập & giám sát cá nhân**. Tôn trọng điều khoản dịch vụ
-của Hanami Website và Cloudflare. Tần suất check 1 phút/lần, không spam, không tạo
-máy thật (bot chỉ ĐỌC dropdown, không bấm "Tạo máy UGPhone"), không dùng thương mại.
+Dự án phục vụ **học tập & giám sát cá nhân**. Tôn trọng ToS của Hanami Website và
+Cloudflare. Tần suất 1 phút/lần, không spam, **không tạo máy thật** (bot chỉ ĐỌC
+dropdown, không bấm "Tạo máy UGPhone"), không dùng thương mại.
 
 ---
 
@@ -441,71 +429,109 @@ máy thật (bot chỉ ĐỌC dropdown, không bấm "Tạo máy UGPhone"), khô
 
 ### Tổng quan các phiên bản
 
-| Version | Nguồn dữ liệu | Kiến trúc đọc | Điểm nhấn |
+| Version | Engine | Kiến trúc đọc | Điểm nhấn |
 |---|---|---|---|
-| v1.0 | `/status_trial_ugphone` | Requests + scraper | Rời Render (IP bị blacklist), chuyển GitHub Actions |
-| v1.3 | `/status_trial_ugphone` | Camoufox/SeleniumBase | Cơ chế Relay 345 phút + force push state |
-| v1.4 | `/status_trial_ugphone` | Smart Restart | Bỏ chặn ảnh, restart chiến lược (Camoufox/SeleniumBase) |
-| v1.5 | `/status_trial_ugphone` | pytz | Đồng bộ giờ, xóa time.is, hết lệch phút |
-| v2.0 | `/status_trial_ugphone` | Tự chẩn đoán + alert | Phát hiện tường login, alert Discord khi fail |
-| v3.x | `/tools/buydevice_ugphone` | Anti-console + inject token | Chuyển sang trang BUY, BUT mang bệnh login-wall check + panic loop |
-| **v4.0** | `/tools/buydevice_ugphone` | **Headful + Xvfb 1920, kiên nhẫn** | **Xóa login-wall check + panic restart. reopen: 0. ĐÓNG BĂNG** |
+| v1.0–v2.0 | Requests/Camoufox/SeleniumBase | trang `/status_trial_ugphone` | Nền móng: relay 345p, smart restart, pytz, alert |
+| v3.x | Camoufox + inject token | `/tools/buydevice_ugphone` | Chuyển trang BUY, NHUNG bệnh login-wall check + panic loop |
+| v4.0 | Camoufox headful + Xvfb 1920 | goto mỗi phút | Xóa login-wall + panic. Sinh bệnh "liệt-có-tổ-chức" (kiên nhẫn vô hạn với kẹt CF) |
+| v4.1–4.5 | Camoufox headful | peek + trần CF + sửa nhầm-CF-by-fetch | Grace CF, máy trạng thái, classify DOM-live (giết nhầm CF do bundle SPA) |
+| v4.6–4.11 | Camoufox headful | như trên + UX | Kênh sạch (chỉ embed/ping), embed lỗi 3 dòng, owner ping vòng đời, geoip (VÔ DỤNG — log chứng minh) |
+| **v5.0** | **DrissionPage / Chrome-CDP** | **peek-only (KHÔNG goto mỗi phút)** | **Đổi engine = quyết định thắng. CF tự nhả ~7s, 39–49p GREEN liền mạch. drift_test PASS+DATA** |
+| v5.1–5.2 | Chrome-CDP | peek-only + goto-thừa | Sửa UNK không chụp ảnh; push ảnh debug NGAY; retry-hydrate sau goto |
+| **v5.3** | **Chrome-CDP** | **peek-only + UNK recovery** | **UNK = redirect Dashboard (bằng chứng ảnh). Recovery goto ép về buydevice, bot tự cure không ping. VPS chính thức loại** |
 
-### v4.0 — "Kiên nhẫn, không phán đoán sai" (phiên bản hiện tại)
+### v5.3 — "Tự kéo về trang khi bị đá về Dashboard" (hiện tại)
 
-**Bối cảnh:** v3.x thêm logic check "login wall" + panic restart 3 lần. Trên GitHub
-Actions, logic này đọc nhầm text trang thành login wall -> panic loop -> mất
-cf_clearance mỗi lần mở browser -> Cloudflare khóa IP -> timeout 90s. Đồng thời
-headless bị server trả login wall GIẢ (bẫy anti-bot), còn headful trên Xvfb sai độ
-phân giải thì Turnstile không render nổi.
+**Bối cảnh / phát hiện bằng ảnh.** Log v5.0–5.2 cho thấy UNK xảy ra ở HAI trigger:
+ngay sau goto-thừa (20:00, 10:58) VÀ khi ngồi im peek (18:09). Ảnh
+`last_error.png` anh chủ đưa vạch trần: "trang không rõ mặt" kỳ thực là **Dashboard
+gốc** (`hanaminikata.com`, "Đăng nhập để xem Dashboard") — site có anti-console/
+idle-guard đá bot về nhà. Đây KHÔNG phải login wall, KHÔNG phải trang lạ.
 
-**Thay đổi cốt lõi:**
+**Thay đổi cốt lõi v5.3:**
 
-- 🗑️ **Xóa sạch** mọi check `login` / `token` / `just a moment` trong luồng chính.
-  Trang không cần login -> check đó là nguồn gốc thảm họa.
-- 🗑️ **Xóa panic restart** khi không thấy dropdown / parse thiếu. Lỗi mềm giờ chỉ
-  **chụp ảnh debug** (`data/debug/last_error.png`) và giữ browser sống.
-- 🧠 **Đổi triết lý**: browser mở 1 lần, mỗi phút **reload nhẹ trên cùng context**
-  để giữ `cf_clearance` tích luỹ. Turnstile verify 1 lần, các phút sau vào thẳng.
-- 🖥️ **Headful + humanize + Xvfb 1920x1080**, `VIEWPORT` trong code khớp Xvfb screen
-  để toạ độ click Turnstile chính xác.
-- ⏳ **Kiên nhẫn đúng chỗ**: chờ 12s sau goto, đợi text "Tạo máy UGPhone" (tối đa 15s)
-  làm mốc UI thật, thay vì poll "just a moment".
-- 🛡️ **Retry-safe navigation**: `_safe_eval` / `_safe_content` phân biệt "đang navigate"
-  (browser còn sống) vs "chết thật" (target closed) -> hết lỗi `Execution context
-  was destroyed` và hết hiểu nhầm navigation thành chết.
-- 🔒 **Mở lại browser chỉ khi chết thật**, có cooldown 60s + giới hạn 3 lần/job,
-  vượt thì exit êm cho relay job sau (không loop vô hạn).
-- 🧊 **Chính sách đóng băng**: liệt kê rõ những thứ CẤM sửa để không phá vỡ cân bằng.
+- ♻️ **UNK recovery**: khi classify = UNK, bot **goto ép về TARGET_URL (buydevice)**
+      1 lần/episode (trần `MAX_RECOVERY_GOTO`). Cure (GREEN) → lấy data, **KHÔNG
+      ping chủ** (bot tự fix redirect). Không cure → UNK dai dẳng thật → ping →
+      giveup. Flag `unk_recovery_done` reset khi GREEN để episode kế được recovery.
+- 🧊 **Giữ peek-only + goto-thưa + retry-hydrate** của v5.0–5.2 nguyên vẹn; chỉ
+      THÊM lớp recovery, không đổi luồng đọc.
+- 📝 **Changelog/FAQ ghi trung thực**: UNK = redirect Dashboard (không phải login);
+      CF managed-auto ~7s (không cần click/solver); VPS đã loại; câu freshness
+      goto-thừa vẫn MỞ (chủ chưa chốt).
 
-**Kết quả kiểm chứng (log thật):**
+**Kết quả kỳ vọng:** idle-redirect (18:09 kiểu) được cure trong 1 phút, embed
+không đỏ, chủ không bị réo. goto-redirect (20:00/10:58 kiểu) có thêm 1 cửa cứu
+qua recovery. Chỉ UNK dai dẳng thật (anti-console kick cả recovery) mới ping +
+nhường job sau.
 
-    ✅ Browser Camoufox-Headful đã khởi động (viewport 1920x1080)
-    ✅ Check [22:12] (DROPDOWN): SG: True, HK: True, JP: True, DE: True, US: True
-    🕐 Footer: 22:12:05 (reopen thật: 0)
+### v5.0–5.2 — "Đổi engine, peek-only, bằng chứng trước lời hứa"
 
-`reopen: 0` = browser không bị đóng/mở lần nào = Turnstile tự pass, không panic.
+**Bước ngoặt của cả series.** Sau 11 phiên bản vá Camoufox mà bot vẫn kẹt CF phút
+0 (job 18:24: `Mode khởi đầu: CF`, 3 lần reset context thua, chết sau 11p), chủ
+repo đưa bài Gemini về DrissionPage và **bắt test nhỏ trước khi port** — đúng kỷ
+luật "không đoán mò" mà em đã thề bỏ nhiều lần. `drift_test.py` chạy 1 lần qua
+workflow riêng → verdict **PASS+DATA** (title thật, select FOUND, chứa Singapore,
+CF tự nhả). Chỉ SAU khi có verdict em mới port v5.0.
 
-**Ghi chú:** `cookies.json` / `HANAMI_COOKIES` ở v3.x trở thành dư thừa ở v4.0 (trang
-không cần login). Code vẫn đọc nếu có nhưng anh không cần tạo/quản lý nữa.
+- 🖥️ **Engine: Camoufox/Firefox → DrissionPage/Chrome-CDP.** Cùng runner, cùng
+      Xvfb 1920, cùng IP — chỉ khác engine. Firefox-stealth bị CF chấm thấp;
+      Chrome thật qua CDP (không `navigator.webdriver` kiểu Selenium) → CF managed-
+      auto tự nhả ~7s. Log v5.0: `Mode khởi đầu: GREEN`, 39p `✅ Check (DOM)` liên
+      tục, `reopen:0`, `cf-ctx:0`. Đây là lần đầu bot sống liền mạch.
+- 👁️ **peek-only**: mỗi phút chỉ đọc `page.html` (DOM hydrate), KHÔNG goto. Không
+      navigation = CF không cớ chèn challenge. goto chỉ còn 3 lúc có节流.
+- 🐛 **v5.1 sửa bug em tự gây**: UNK không gọi `screenshot_debug` → mất bằng chứng.
+      Thêm chụp ảnh vào MỌI nhánh UNK.
+- 🐛 **v5.2 sửa bug commit timing**: ảnh debug chỉ push CUỐI job → chủ mở GitHub
+      lúc lỗi thấy ảnh CŨ. Thêm `push_debug_shot` (throttle 60s) push NGAY khi
+      chụp. + retry-hydrate sau goto-thừa để phân biệt "hydrate chậm" vs "trang lạ".
+
+**Bài học em ghi lại (không giấu):** geoip (v4.11) là lần em ĐOÁN MÒ — thêm
+`camoufox[geoip]` vì lý thuyết "fingerprint lệch IP" của bài Gemini, nhưng log
+in ra `tz=UTC lang=en-US` (đã khớp IP US) → geoip không đổi 1 byte hành vi CF.
+Em nhận lỗi và rút lại hướng đó. Series này thắng nhờ **bằng chứng (ảnh + log +
+drift_test)**, không nhờ lời hứa "xong" của em.
+
+### v4.0–4.11 — "Kiên nhẫn, rồi kiên nhẫn phải có lối thoát"
+
+Chữa bệnh panic-restart của v3.x (headful + Xvfb 1920 + lỗi mềm chỉ chụp debug),
+nhưng sinh bệnh "liệt-có-tổ-chức" (kiên nhẫn vô hạn với kẹt CF → fail 283p mà
+`reopen:0`). v4.1 gắn trần thoát-kẹt (grace CF, mở context, nhường job sau).
+v4.5 giết bệnh nhầm-CF-do-fetch (bundle SPA chứa constant "verifying..." →
+classify DOM-live mới đúng). v4.6–4.11 dọn kênh Discord (chỉ embed + ping),
+embed lỗi 3 dòng, owner ping vòng đời (xóa khi xanh + cooldown flap). Toàn bộ
+chạy trên Camoufox/Firefox — engine cuối cùng bị chứng minh là kẹt phút 0 ở v5.0.
+
+### v3.x — Anti-console + inject token (giai đoạn sai hướng)
+
+Chuyển sang trang BUY, thêm chống redirect + inject `session_token`. Sai ở chỗ:
+trang **không cần token**, và logic check "login wall" + panic loop chính là thứ
+khiến Cloudflare khóa IP. Toàn bộ phần này bị loại ở v4.0.
+
+### v1.x–v2.0 — Nền móng trên trang status
+
+Relay 345 phút, smart restart, pytz đồng bộ giờ, tự chẩn đoán + alert. Đặt nền
+tảng hạ tầng (Discord embed edit, ping tự xóa, force-push state) mà v5.3 vẫn dùng
+nguyên.
 
 ---
 
 ## 💖 Credit
 
-- **Camoufox** — Stealth Firefox engine (headful, humanize)
-- **DrissionPage** — Vận hành trình duyệt website ổn định nhất
+- **DrissionPage** — Engine Chrome-CDP (thứ đã cứu bot khỏi Firefox-stealth)
+- **Google Chrome** — Browser thật trên runner `ubuntu-26.04`
 - **Xvfb** — Display ảo để headful chạy trên GitHub Actions
 - **BeautifulSoup4** — Parse HTML
 - **pytz** — Đồng bộ giờ Việt Nam chính xác
-- **Hanami Website** — Nền tảng cung cấp dữ liệu trial UGPhone
-- **Aozora Cyrus** — Chủ nhân của Repository
+- **Hanami Website** — Nền tảng dữ liệu trial UGPhone
+- **Aozora Cyrus** — Chủ nhân Repository, người bắt lỗi bằng ảnh & giữ kỷ luật "test trước khi port"
 - **Aozorians** — Hỗ trợ phát triển & testing
 
 ---
 
-<div align="center">
+<div align="center>
 
-*Made with ❤️ by Aozorians • v4.0 đã đóng băng — đừng sửa khi chưa hỏng • Nếu thấy hữu ích, cho repo một ⭐ nhé!*
+*Made with ❤️ by Aozorians • v5.3 đã đóng băng (kèm ngoại lệ trần tự-cứu có bằng chứng) • Hỏng thật hãy sửa, xanh thì để yên • Mỗi dòng trong README này đều có log/ảnh làm chứng, không có lời hứa suông • Cho repo một ⭐ nếu hữu ích!*
 
 </div>
