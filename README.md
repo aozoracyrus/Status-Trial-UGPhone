@@ -532,6 +532,6 @@ nguyên.
 
 <div align="center>
 
-*Made with ❤️ by Aozorians • v5.3 đã đóng băng (kèm ngoại lệ trần tự-cứu có bằng chứng) • Hỏng thật hãy sửa, xanh thì để yên • Mỗi dòng trong README này đều có log/ảnh làm chứng, không có lời hứa suông • Cho repo một ⭐ nếu hữu ích!*
+*Made with ❤️ by Aozorians • v5.3 đã đóng băng (kèm ngoại lệ trần tự-cứu có bằng chứng) • Hỏng thật hãy report, xanh thì để yên • Mỗi dòng trong README này đều có log/ảnh làm chứng, không có lời hứa suông • Cho repo một ⭐ nếu hữu ích!*
 
 </div>
