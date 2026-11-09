@@ -1,15 +1,21 @@
-<div align="center">
+<div align="center>
 
 # 📱 STATUS TRIAL UGPHONE — DISCORD BOT
 
 **Giám sát trạng thái máy trial UGPhone 24/7 • GitHub Actions Relay • 100% miễn phí**
 
-*Không VPS • Không Render • Không ScraperAPI • Không tốn một xu*
+*Không VPS • Không Render • Không ScraperAPI • Không token đăng nhập • Không tốn một xu*
 
-**Phiên bản v4.0 — "Kiên nhẫn, không phán đoán sai".**
-Trang đích là trang MUA công khai, KHÔNG cần đăng nhập. Hệ thống bảo mật duy nhất là
-Cloudflare Turnstile, và nó TỰ verify khi browser headful + Xvfb render đủ lâu.
-Mọi "login wall" mà bot từng gặp ở v3.x đều là **false positive do code tự bịa ra**.
+**Phiên bản v5.3 — "Chrome-CDP + peek-only + tự kéo về trang".**
+Sau 13 phiên bản, bot đã tìm ra con đường sống trên GitHub Actions: **engine Chrome
+thật điều khiển qua CDP (DrissionPage)** thay vì Firefox-stealth (Camoufox), và
+**mỗi phút chỉ "nhìn trộm" DOM (peek) chứ không tải lại trang (goto)**. Kết quả:
+Cloudflare managed-auto tự nhả trong ~7 giây, bot xanh liền mạch hàng chục phút,
+và khi site đá bot về Dashboard (anti-console/idle) thì bot **tự goto ép về lại
+trang buydevice** mà không cần réo chủ. VPS đã được loại — GitHub là đường chính.
+
+**Trạng thái hiện tại (07/11/2026):** 🟢 ĐANG CHẠY. CF vào ~7s, peek-only sạch,
+UNK = redirect Dashboard đã có recovery tự cure.
 
 </div>
 
@@ -21,7 +27,7 @@ Mọi "login wall" mà bot từng gặp ở v3.x đều là **false positive do 
 - [⚙️ Yêu cầu](#️-yêu-cầu)
 - [🔑 Thêm Secrets](#-thêm-secrets)
 - [🔓 Cấp quyền cho Repo](#-cấp-quyền-cho-repo)
-- [🚀 Cách hoạt động](#-cách-hoạt-động)
+- [🚀 Cách hoạt động (kiến trúc v5.3)](#-cách-hoạt-động-kiến-trúc-v53)
 - [🧊 Chính sách đóng băng](#-chính-sách-đóng-băng)
 - [📁 Cấu trúc dự án](#-cấu-trúc-dự-án)
 - [🛠️ Lỗi thường gặp & cách sửa](#️-lỗi-thường-gặp--cách-sửa)
@@ -38,31 +44,51 @@ Mọi "login wall" mà bot từng gặp ở v3.x đều là **false positive do 
 Bot theo dõi trạng thái máy trial UGPhone qua trang **mua hàng công khai**
 (`hanaminikata.com/tools/buydevice_ugphone`) và hiển thị lên Discord.
 
-Sự thật nền tảng của v4.0 (đã kiểm chứng bằng log thật `reopen: 0`):
+Bốn sự thật nền tảng (mỗi sự thật đều có bằng chứng log/ảnh thật, không suy diễn):
 
-- Trang này **HOÀN TOÀN KHÔNG CẦN ĐĂNG NHẬP**. Chrome thường, không login, vẫn thấy
-  dropdown 5 khu vực + nút "Tạo máy UGPhone".
-- Bảo mật duy nhất là **Cloudflare Turnstile**, và nó **tự pass** khi browser headful
-  render đủ lâu trên Xvfb đúng độ phân giải.
-- Do đó bot v4.0 **không còn** logic check "login wall", **không còn** panic restart
-  loop. Hai thứ đó ở v3.x chính là nguồn gốc khiến Cloudflare khóa IP (timeout 90s).
+- Trang này **HOÀN TOÀN KHÔNG CẦN ĐĂNG NHẬP**. Chrome thường, không login, vẫn
+  thấy dropdown 5 khu vực + nút "Tạo máy UGPhone". Mọi check "login wall" đều là
+  ảo giác của code (bệnh v3.x) và đã bị xóa vĩnh viễn.
+- Lớp bảo vệ là **Cloudflare managed-auto**: trang "Verifying you are human"
+  hiện ~7 giây rồi **tự nhả**, KHÔNG có checkbox/widget để click. Đây là lý do
+  code `click_turnstile` thường in `ℹ️ Không thấy widget` — đó là BÌNH THƯỜNG,
+  không phải lỗi.
+- Site có **anti-console / idle-guard**: ngồi im quá lâu HOẶC navigate sai nhịp
+  sẽ bị **đá về trang Dashboard gốc** (`hanaminikata.com`, "Đăng nhập để xem
+  Dashboard"). Đây KHÔNG phải trang lạ, KHÔNG phải login wall — nó là redirect
+  lạc trang. v5.3 chữa bằng cách **goto ép về buydevice lại** (recovery), bot tự
+  fix, không réo chủ.
+- **Engine quyết định tất cả**: Firefox-stealth (Camoufox) bị CF chấm điểm thấp
+  → kẹt từ phút 0, reset context cũng thua. Chrome thật qua CDP (DrissionPage)
+  → vân tay sạch, `navigator.webdriver` không bị set kiểu Selenium → CF tự nhả
+  ~7s. Bằng chứng: `drift_test` PASS+DATA, rồi 39–49 phút GREEN liên tục.
 
-Tính năng cốt lõi:
+Tính năng cốt lõi v5.3:
 
-- 🟢 **5 khu vực**: Singapore, Hong Kong, Japan, Germany, America — đọc từ chấm màu
-  trong dropdown (🟢 = còn máy, 🔴 = hết máy).
-- 📊 **1 Embed duy nhất** được EDIT liên tục, không spam tin nhắn.
-- 🕐 **Footer Uptime** đúng giây `:00` mỗi phút, format 24h, dùng `pytz` (Asia/Ho_Chi_Minh).
-- 🔔 **Ping role** khi khu vực chuyển hết → còn máy, **tự xóa sau 5 phút**.
-- 🛡️ **Headful Camoufox + Xvfb 1920x1080 + humanize**: mô phỏng Chrome thật để
-  Turnstile tự verify, không chặn ảnh.
-- ⏳ **Kiên nhẫn**: chờ 12s sau mỗi lần load cho Xvfb + Turnstile, đợi text
-  "Tạo máy UGPhone" làm mốc UI thật, tối đa 15s.
-- 📸 **Lỗi mềm = chụp debug, giữ browser**. Browser chỉ bị mở lại khi **chết thật**
-  (target closed / connection refused), có cooldown 60s + giới hạn 3 lần/job.
-- 🚨 **Alert Discord** nếu không đọc được stock 10 phút liên tiếp (và nhắc mỗi giờ),
-  nhưng KHÔNG bao giờ vì alert mà đập browser.
-- 🔄 **Relay 24/7**: mỗi job 345 phút, force push state, tự kích job kế.
+- 🟢 **5 khu vực** SG / HK / JP / DE / US — đọc chấm màu từ DOM live (🟢 còn máy,
+  🔴 hết máy).
+- 📊 **1 Embed duy nhất** được EDIT liên tục, không spam. Khi lỗi, embed đổi sang
+  3 dòng: `🚨 Đang gặp lỗi` / `🤔 Lí do` / `🛠️ Chúng tôi sẽ sửa`.
+- 🕐 **Footer Uptime** đúng giây `:00` mỗi phút, 24h, `pytz` Asia/Ho_Chi_Minh.
+- 🔔 **Ping role** khi khu vực hết → còn máy, tự xóa sau 5 phút.
+- 👤 **Ping chủ (owner)** CHỈ khi lỗi **nghiêm trọng dai dẳng** (bot bó tay).
+  Tin ping **TREO SUỐT** thời gian embed đỏ, **chỉ bị xóa khi bot XANH lại**
+  (không timer 5p), và có **cooldown 10 phút** chống spam khi bot dao động chớp.
+  CF và SRV (server nghỉ) **KHÔNG BAO GIỜ ping** — bot tự lo / chờ.
+- 🖥️ **Headful Chrome thật + Xvfb 1920x1080**, điều khiển qua CDP (DrissionPage),
+  `humanize` bật, không chặn ảnh.
+- 👁️ **Peek-only mỗi phút**: đọc `page.html` (DOM đã hydrate), **KHÔNG goto**.
+  Không navigation = Cloudflare không có cớ chèn challenge = xanh liền mạch.
+- 🔁 **Goto có chủ đích, có节流**: chỉ 3 lúc — (1) mở job 1 lần, (2) goto-thừa
+  mỗi 10 phút để re-hydrate chống data stale, (3) recovery khi UNK. Mỗi loại có
+  trần riêng, không spam.
+- ♻️ **Retry-hydrate**: UNK ngay sau goto-thừa → retry peek 3 lần cách 8s trước
+  khi kết luận (phân biệt "hydrate chậm, cứu được" vs "trang lạ thật").
+- 📸 **Ảnh debug push NGAY khi chụp** (throttle 60s) → mở GitHub lúc lỗi là thấy
+  ảnh mới, không đợi job chết. Mọi nhánh lỗi (SRV/CF/UNK/GREEN-mù) đều chụp.
+- 🛡️ **Máy trạng thái 4 chế độ** GREEN / SRV / CF / UNK, mỗi chế độ một phản ứng
+  riêng, không gộp thành panic loop.
+- 🔄 **Relay 24/7**: job 345 phút, force-push state, tự kích job kế.
 
 ---
 
@@ -70,102 +96,183 @@ Tính năng cốt lõi:
 
 | Thành phần | Bắt buộc | Ghi chú |
 |---|---|---|
-| Tài khoản GitHub | ✅ | Repo **Public** = unlimited Actions minutes |
-| Discord Webhook | ✅ | Kênh nhận embed + ping |
+| Tài khoản GitHub | ✅ | Repo **Public** = unlimited minutes |
+| Discord Webhook | ✅ | Kênh nhận embed + ping + owner ping |
 | Personal Access Token | ✅ | Quyền `repo` + `workflow` |
-| Xvfb screen 1920x1080 | ✅ | **Phải khớp** `VIEWPORT` trong code, lệch là click Turnstile sai toạ độ |
-| VPS / Render | ❌ | Không cần. IP datacenter không phải vấn đề (đã chứng minh) |
-| Thẻ tín dụng / Token đăng nhập | ❌ | **Không cần.** Trang không yêu cầu login |
+| Xvfb screen 1920x1080 | ✅ | **Phải khớp** `VIEWPORT` code, lệch = sai toạ độ |
+| Google Chrome (runner) | ✅ | Image `ubuntu-26.04` đã có sẵn `google-chrome-stable` |
+| VPS / Render | ❌ | **Đã loại.** GitHub là đường chính (xem FAQ) |
+| Token đăng nhập / cookie | ❌ | **Không cần.** Trang không đòi login |
+| Residential proxy / CapSolver | ❌ | **Không cần.** CF tự nhả ~7s, datacenter vô tội |
 
 ---
 
 ## 🔑 Thêm Secrets
 
-Vào repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
+Repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
 
 | Secret | Mô tả | Cách lấy |
 |---|---|---|
-| `DISCORD_WEBHOOK_URL` | Webhook kênh Discord | Cài đặt kênh → Tích hợp → Webhooks → Tạo |
-| `ROLE_PING_ID` | ID role để ping khi có máy | Bật Developer Mode → chuột phải role → Copy ID |
-| `PAT` | Token push code + trigger relay | Developer settings → Tokens (classic) → tick `repo` + `workflow` |
+| `DISCORD_WEBHOOK_URL` | Webhook kênh Discord | Kênh → Tích hợp → Webhooks → Tạo |
+| `ROLE_PING_ID` | ID role để ping khi có máy | Developer Mode → chuột phải role → Copy ID |
+| `PAT` | Token push + trigger relay | Developer settings → Tokens (classic) → `repo` + `workflow` |
 
-> `HANAMI_COOKIES` / `cookies.json` ở v3.x là **dư thừa** ở v4.0 vì trang không cần
-> login. Code v4.0 vẫn đọc nếu có (harmless), nhưng anh không cần tạo nữa.
+> `OWNER_ID` (ID chủ để réo khi lỗi nghiêm trọng) **KHÔNG** đưa vào Secrets/env.
+> Nó hard-default trong code. Lý do: nếu truyền qua env mà secret trống, env sẽ
+> = `""` (chuỗi rỗng) làm code nhận `""` thay vì default → ping hỏng âm thầm
+> `<@>`. Muốn đổi ID thì sửa 1 dòng trong `long_runner.py`, không thêm env.
+
+> `HANAMI_COOKIES` / `cookies.json` ở v3.x là **dư thừa** từ v4.0 trở đi (trang
+> không cần login). Code v5.3 không còn đọc chúng — xóa khỏi repo/secrets cho gọn.
 
 ---
 
 ## 🔓 Cấp quyền cho Repo
 
-1. **Đổi repo sang Public**: Settings → General → Danger zone → Change visibility
-2. **Cấp quyền ghi cho Actions**: Settings → Actions → General → **Read and write permissions** → Save
+1. **Repo sang Public**: Settings → General → Danger zone → Change visibility
+2. **Ghi cho Actions**: Settings → Actions → General → **Read and write permissions** → Save
 
 ---
 
-## 🚀 Cách hoạt động
+## 🚀 Cách hoạt động (kiến trúc v5.3)
 
-### Luồng đọc dữ liệu v4.0 (mỗi phút, trên CÙNG một browser)
+Bot chạy trên **một Chrome thật** (qua CDP) cho cả job. Mỗi phút, bot nhìn DOM
+hiện tại và phân loại thành 4 chế độ, rồi phản ứng ĐÚNG bệnh của chế độ đó.
+Nguyên tắc vàng: **chỉ goto khi thật cần; khi chưa chắc thì peek, không reload.**
 
-    1. Reload NHẸ trang đích trên browser đang sống (giữ cf_clearance tích luỹ,
-       KHÔNG đóng/mở browser).
-    2. Chờ 12s (WAIT_AFTER_GOTO_MS) cho Xvfb render + Turnstile tự verify.
-    3. Best-effort click vào iframe Turnstile nếu thấy (null-safe, không fail nếu không có).
-    4. Đợi text "Tạo máy UGPhone" hiện (tối đa 15s) = mốc UI THẬT đã load.
-       - Chưa hiện  -> chụp debug, giữ browser, thử lại phút sau. KHÔNG restart.
-    5. Click mở dropdown khu vực -> đọc toàn bộ option/li -> parse chấm màu.
-       - Thiếu region / không thấy dropdown -> chụp debug, giữ browser. KHÔNG restart.
-    6. Đủ 5 khu vực -> EDIT embed Discord, so sánh prev_state để ping role.
-    7. fail_streak CHỈ dùng để bắn alert sau 10 phút, KHÔNG đụng tới browser.
+Phân loại bằng chuỗi đặc trưng THẬT (không đoán mò, không có login/token):
 
-Browser chỉ bị mở lại khi `_is_really_dead()` trả True (target closed, connection
-refused...). Khi đó: cooldown 60s cho IP nguội -> mở lại -> giới hạn 3 lần/job,
-vượt thì **exit êm** để relay job sau tiếp, chứ không loop vô hạn.
+    GREEN  = DOM chứa "Tạo máy UGPhone"        → trang buydevice đã hydrate
+    SRV    = DOM chứa "error code 520/5xx..."  → máy chủ Hanami nghỉ
+    CF     = DOM chứa "verifying you are human" / "just a moment" → Cloudflare
+    UNK    = không match cả 3                  → thường là bị đá về Dashboard
 
-### Vì sao headful + Xvfb mà không headless
+Mở đầu job: `open_browser()` → goto 1 lần → classify → nếu UNK thì recovery ngay.
 
-| Chế độ | Cloudflare | Kết quả trang | Verdict |
-|---|---|---|---|
-| Headless (v3.x) | Qua được | Server trả **login wall GIẢ** (bẫy anti-bot) | Chết ở ải 2 |
-| Headful + Xvfb 1920 (v4.0) | **Tự pass** trong 12s | UI thật hiện, đọc được dropdown | ✅ Sống |
+Mỗi phút (đúng nhịp `:00`), lặp 1 vòng:
 
-Headless để lộ `navigator.webdriver` + fingerprint automation -> server giả vờ đòi
-login để đá. Headful trên Xvfb đúng độ phân giải thì các dấu vết đó biến mất,
-Turnstile coi là người thật và tự xác minh.
+    NẾU browser chết (đọc title fail):
+        đóng -> cooldown 60s -> MỞ CHROME MỚI (trần 3 lần/job)
+        vượt trần -> ping chủ -> KẾT THÚC JOB ÊM
 
-### Vì sao 345 phút
+    NẾU mode = GREEN:
+        nếu đã 10p kể từ goto trước VÀ còn suất goto-thừa:
+            goto re-hydrate (chống stale) -> peek -> classify
+            nếu UNK sau goto: retry peek 3 lần cách 8s
+                cứu được (GREEN) -> tiếp
+                vẫn UNK -> ghi nhận "không phải hydrate chậm"
+        NGƯỢC LẠI (phút thường): CHỈ peek, KHÔNG goto   ← đây là bí quyết xanh
+        peek -> classify:
+            GREEN  -> parse 5 region từ page.html -> data
+            SRV    -> chuyển mode SRV, chụp ảnh, chờ thụ động
+            CF     -> chuyển mode CF, click best-effort, chờ tự nhả
+            UNK    -> RECOVERY: goto ép về buydevice 1 lần/episode
+                        cure (GREEN) -> lấy data, KHÔNG ping
+                        fail -> chuyển mode UNK dai dẳng
 
-GitHub giới hạn mỗi job 360 phút. Chạy 345 phút chừa 15 phút an toàn cho commit +
-trigger. Job bị kill sớm thì state đã lưu liên tục, job sau nối tiếp embed cũ.
+    NẾU mode = SRV (server nghỉ):
+        CHỈ peek chờ, KHÔNG reload, KHÔNG goto, KHÔNG ping
+        (IPv4/runner mới cũng vô ích vì cùng server đó đang nghỉ)
+        server sống lại -> GREEN -> đọc data
 
-### Vì sao dùng pytz thay time.is
+    NẾU mode = CF (Cloudflare verify):
+        peek chờ, KHÔNG reload (reload = đá nát verify)
+        click widget best-effort 1 lần (managed-auto thường không có gì để click)
+        kẹt >= 4p -> mở context Chrome mới (danh tính mới) -> trần 3
+        hết trần -> ping chủ -> KẾT THÚC JOB ÊM (nhường job sau IP mới)
 
-`time.is` fetch HTTP mỗi 30s -> có thể fail/chậm, log và footer lệch giờ, phụ thuộc
-bên thứ 3. `pytz` Asia/Ho_Chi_Minh chạy offline, log và footer dùng chung một mốc
-giờ lấy SAU khi push -> không bao giờ lệch phút.
+    NẾU mode = UNK (bị đá về Dashboard):
+        lần đầu vào UNK -> RECOVERY goto ép về buydevice
+            cure -> GREEN, không ping
+            fail -> đếm UNK, chờ thụ động
+        UNK >= 8p -> ping chủ -> KẾT THÚC JOB ÊM
+
+Cuối mỗi phút: xanh → push embed 5 khu vực + xóa owner ping (nếu có) + reset
+flag recovery; lỗi → push embed 3 dòng (🚨/🤔/🛠️) + ping chủ NẾU nghiêm trọng
+dai dẳng (CF/SRV không ping). `fail_streak` chỉ dùng để ping, **không bao giờ**
+đụng browser.
+
+### Vì sao Chrome-CDP mà không Firefox-stealth
+
+    Camoufox/Firefox (v3–v4.11): CF chấm điểm thấp -> kẹt PHÚT 0, reset context
+                      (cùng IP, cùng engine) cũng thua -> chết job sau 11p.
+    DrissionPage/Chrome-CDP (v5.0+): Chrome thật, attach qua CDP, navigator.webdriver
+                      không set kiểu Selenium -> CF managed-auto tự nhả ~7s ->
+                      39–49p GREEN liên tục. Cùng runner, cùng Xvfb, cùng IP —
+                      chỉ khác engine. Đây là thay đổi quyết định, có bằng chứng.
+
+### Vì sao peek-only mà không goto mỗi phút
+
+    goto mỗi phút (bệnh v4.3): Cloudflare thấy một "khách" reload trang protected
+                      dày đặc = hành vi bot kinh điển -> chèn challenge giữa job.
+    peek-only (v5.0+): đọc DOM đã hydrate, KHÔNG navigation -> CF không có cớ
+                      chèn challenge -> xanh liền mạch. goto chỉ còn 3 lúc có
+                      chủ đích (mở / goto-thừa thưa / recovery), có节流.
+
+### Vì sao UNK phải recovery (đây là phát hiện quan trọng nhất)
+
+Ảnh `last_error.png` thật cho thấy "trang không rõ mặt" kỳ thực là **Dashboard
+gốc** (`hanaminikata.com`, "Đăng nhập để xem Dashboard"), KHÔNG phải buydevice.
+Site có anti-console/idle-guard đá bot về nhà. Fix: khi UNK, bot **goto ép về
+TARGET_URL (buydevice)** 1 lần. Cure được → GREEN, bot tự fix, không réo chủ.
+Không cure → mới là UNK dai dẳng thật → ping. Giới hạn 1 lần/episode + trần
+riêng, không spam goto.
+
+### Vì sao pytz thay time.is
+
+`time.is` fetch HTTP mỗi 30s → fail/chậm, log và footer lệch giờ, phụ thuộc bên 3.
+`pytz` chạy offline, log và footer dùng chung MỘT mốc giờ lấy sau khi push → không
+bao giờ lệch phút.
 
 ---
 
 ## 🧊 Chính sách đóng băng
 
-Bot v4.0 đang ở trạng thái cân bằng mong manh: **headful + Xvfb 1920x1080 + chờ 12s +
-giữ browser sống**. Thiếu một miếng là Turnstile lại challenge loop. Từ giờ tới khi
-THẬT SỰ hỏng, **CẤM** sửa những thứ sau:
+v5.3 chạy được là nhờ đúng bộ thông số hiện tại. **CẤM** sửa khi bot đang xanh:
 
 - ❌ Không đổi `VIEWPORT` (1920x1080) và không đổi Xvfb screen — phải khớp nhau.
-- ❌ Không giảm `WAIT_AFTER_GOTO_MS` (12000) hay `WAIT_UI_TIMEOUT_MS` (15000).
-- ❌ Không thêm bất kỳ check "login wall" / "just a moment" nào vào luồng chính.
-- ❌ Không thêm panic restart khi không thấy dropdown / parse thiếu.
-- ❌ Không "tối ưu" polling, không đổi engine browser khi chưa hỏng.
-- ❌ Không bận tâm quản lý `cookies.json` / `HANAMI_COOKIES` (vô nghĩa ở trang này).
+- ❌ Không giảm `WAIT_AFTER_GOTO_S` (12). Con số 12 = CF tự nhả ~7s + buffer.
+      Giảm xuống < 7s = bot peek lúc CF chưa nhả → UNK/CF oan.
+- ❌ Không đổi `UI_MARKER_TEXT` ("Tạo máy UGPhone") trừ khi website ĐỔI nút thật
+      (khi đó chỉ sửa 1 chuỗi, không đụng kiến trúc).
+- ❌ Không thêm BẤT KỲ check "login" / "token" / "đăng nhập" nào vào luồng chính.
+      Đó là nguồn gốc thảm họa v3.x. Trang không cần login. UNK = redirect
+      Dashboard, KHÔNG phải login wall — đừng nhầm lại.
+- ❌ Không đổi engine browser (Chrome-CDP → Camoufox/Puppeteer/Playwright/Brave...).
+      Đây là bài học ĐẮT nhất series: Firefox-stealth kẹt phút 0, Chrome-CDP xanh.
+      Đổi engine trên GitHub Actions = quay lại chết, chỉ khác logo.
+- ❌ Không bật `disable_coop=True`, không set `window=(1280,720)`, không override
+      User-Agent. Mấy thứ này là lý thuyết chung trên mạng, áp vào = phá fingerprint
+      đang xanh + lệch viewport khỏi Xvfb = sai toạ độ.
+- ❌ Không mua residential proxy, không đăng ký CapSolver/Anti-Captcha. CF ở đây
+      managed-auto ~7s, datacenter vô tội (Proton/VPS/Chrome thường đều vào được).
+- ❌ Không "tối ưu" polling, không bỏ humanize, không bật lại chặn ảnh, không bỏ
+      peek-only (đừng thêm goto mỗi phút lại).
 
-Cám dỗ "cải thiện thêm tí" lúc này = rủi ro phá vỡ cái vừa chạy được. Bài học xương
-máu của dự án: mỗi lần thêm logic phán đoán là một lần hỏng. Cứ để nó yên.
+### Cái trần tự-cứu là NGOẠI LỆ được phép (và vì sao)
+
+Các biến `CF_STUCK_RESTART_MIN` (4), `MAX_CF_RESTART` (3), `CF_GRACE_MIN` (2),
+`UNK_GIVEUP_MIN` (8), `MAX_RECOVERY_GOTO` (40), `REFRESH_EVERY_MIN` (10),
+`MAX_REAL_GOTO` (40), `GOTO_UNK_RETRY` (3) là **mới/cập nhật ở v5.x** và ĐƯỢC phép
+tồn tại vì chúng kích hoạt dựa trên **bằng chứng cứng** (ảnh `last_error.png` =
+Dashboard; log = CF tự nhả ~7s; log = UNK sau goto), KHÔNG phải đoán mò. Phân biệt rõ:
+
+    Đóng băng cấm: SUY ĐOÁN trạng thái trang rồi hành động (bệnh v3/v4.0).
+    Cho phép:      PHỤC HỒI có giới hạn khi một trạng thái ĐÃ ĐƯỢC XÁC MINH bằng ảnh/log.
+
+Quy tắc vàng: **đừng đặt trần = vô hạn** (tái sinh liệt-có-tổ-chức của v4.0), và
+**đừng đặt trần = 0** (tái sinh panic loop của v3). Giá trị hiện tại là điểm cân
+bằng: đủ kiên nhẫn cho CF tự nhả + đủ recovery cho idle-redirect + đủ trần để
+không nằm liệt.
 
 ### Điều duy nhất cần biết trước (để khỏi hoảng)
 
-Khi job hết 345 phút -> job relay sau mở browser MỚI tinh -> mất `cf_clearance` ->
-phút đầu job sau **có thể** hiện vài dòng `⏳` rồi mới `✅`. Đó là **BÌNH THƯỜNG**,
-logic mới kiên nhẫn sẽ tự qua trong ~12-30s rồi xanh tiếp. Thấy `⏳` thoáng qua
-đừng vội sửa.
+Phút đầu mỗi job (Chrome mới tinh, chưa có `cf_clearance`) **sẽ** hiện ~7s trang
+"Verifying you are human" rồi tự GREEN. Đó là BÌNH THƯỜNG. Giữa job, nếu thấy
+`↩️ Recovery ... -> GREEN` nghĩa là site đá bot về Dashboard và bot tự kéo về —
+cũng BÌNH THƯỜNG, không ping. Chỉ lo khi thấy `🛑 ... bó tay` lặp nhiều job liên
+tiếp => khi đó anti-console siết cả recovery, mới tính chuyện khác (NHƯNG VPS đã
+loại, xem FAQ).
 
 ---
 
@@ -174,14 +281,17 @@ logic mới kiên nhẫn sẽ tự qua trong ~12-30s rồi xanh tiếp. Thấy `
     Status-Trial-UGPhone/
     ├── .github/
     │   └── workflows/
-    │       └── runner.yml          # Relay runner (workflow_dispatch)
-    ├── data/                       # Bot tự tạo & commit
-    │   ├── message_id.txt          # ID embed Discord (để edit tiếp)
-    │   ├── prev_state.json         # Trạng thái cũ (phát hiện "vừa có máy")
+    │       ├── runner.yml              # Relay (workflow_dispatch), Xvfb 1920x1080x24
+    │       └── drift-test.yml          # (tùy chọn) test engine Chrome-CDP độc lập
+    ├── data/                           # Bot tự tạo & force-push
+    │   ├── message_id.txt              # ID embed Discord (edit tiếp)
+    │   ├── prev_state.json             # Trạng thái cũ (phát hiện "vừa có máy")
+    │   ├── owner_ping_id.txt           # ID tin ping chủ đang treo (xóa khi xanh)
     │   └── debug/
-    │       └── last_error.png      # Ảnh chụp khi lỗi mềm (debug, không restart)
-    ├── long_runner.py              # 🧠 Não bộ bot v4.0 (headful, kiên nhẫn)
-    ├── requirements.txt            # camoufox, bs4, requests, pytz
+    │       └── last_error.png          # Ảnh chụp khi lỗi (push NGAY, soi được lúc chạy)
+    ├── long_runner.py                  # 🧠 Não bộ v5.3 (Chrome-CDP + peek-only + recovery)
+    ├── drift_test.py                   # (tùy chọn) script test engine 1 lần
+    ├── requirements.txt                # DrissionPage, bs4, requests, pytz
     └── README.md
 
 ---
@@ -190,31 +300,79 @@ logic mới kiên nhẫn sẽ tự qua trong ~12-30s rồi xanh tiếp. Thấy `
 
 | Lỗi / Hiện tượng | Nguyên nhân | Cách sửa |
 |---|---|---|
-| `🔐 Vẫn bị login wall` lặp rồi panic | **Đã xóa ở v4.0.** Nếu còn là do anh thêm lại check login | Xóa mọi `if 'login' in html`. Trang không cần login |
-| `⏳ Cloudflare timeout 90s` + `PANIC RESTART` | Panic loop làm mất cf_clearance + CF khóa IP dồn dập | Về đúng logic v4.0: lỗi mềm chỉ chụp debug, giữ browser |
-| Click Turnstile lệch / không ăn | Xvfb screen ≠ VIEWPORT code | Đặt cả hai = 1920x1080 (xem Chính sách đóng băng) |
-| `⏳ UI chưa hiện` ở phút đầu job relay | Browser mới tinh, chưa có cf_clearance | BÌNH THƯỜNG, tự qua trong 12-30s, đừng sửa |
-| `Không thấy dropdown` lẻ tẻ | Xvfb render chậm / modal chưa mở | Code tự chụp debug + thử lại phút sau, không restart |
-| `❌ Không thể khởi động browser` lần đầu | Camoufox chưa fetch / thiếu lib hệ thống | Workflow có `Pre-download Camoufox` + `libasound2t64` |
-| `libasound2 has no installation candidate` | Ubuntu 24.04 đổi tên package | Dùng `libasound2t64` trong workflow |
-| `libgdk-pixbuf2.0-0 has no candidate` | Package obsolete | Dùng `libgdk-pixbuf-xlib-2.0-0` |
-| `Execution context was destroyed` | Race condition khi trang đang navigate | v4.0 bọc `_safe_eval/_safe_content` retry, navigation ≠ chết |
+| `❓ UNK` lặp rồi `🛑` chết job, ảnh = trang **Dashboard** | **Anti-console/idle đá về nhà (bệnh v5.0–5.2):** bot ngồi ở buydevice bị kéo về gốc, classify không match → UNK | v5.3 recovery: UNK → goto ép về buydevice. Nếu recovery fail dai dẳng → trần `MAX_RECOVERY_GOTO` hết → nhường job sau. Đừng thêm check login — đó KHÔNG phải login wall |
+| `🟡 CF` lặp giữa job (kiểu Camoufox) | Engine Firefox-stealth bị CF chấm thấp | **Đã giải quyết bằng v5.0**: chuyển Chrome-CDP. Nếu còn thấy lặp → đừng vá Firefox, xác nhận đang chạy đúng `long_runner.py` v5.3 (in `🏁 v5.3 starting`) |
+| `ℹ️ Không thấy widget Turnstile để click` | CF ở đây managed-auto, không có checkbox | BÌNH THƯỜNG. Code chờ tự nhả ~7s. Không phải lỗi, không cần sửa |
+| `Fail streak` dài + `reopen:0` + ảnh = "Verifying you are human" | Liệt-có-tổ-chức (bệnh v4.0): kẹt CF nhưng browser sống nên không restart | v5.x có trần CF + mở context mới + nhường job sau. Nếu vẫn streak vô hạn → kiểm tra trần CF_* chưa bị sửa về vô hạn |
+| Ảnh `last_error.png` trên GitHub là ảnh CŨ khi đang lỗi | (bệnh v5.1): commit state chỉ push CUỐI job | v5.2+ push ảnh NGAY khi chụp (throttle 60s). Nếu vẫn cũ → kiểm tra `push_debug_shot` có chạy (log `📤 Đã push ảnh debug`) |
+| Owner ping spam nhiều tin / không xóa khi xanh | (bệnh v4.9/v4.10): timer xóa + green_streak quá cao | v5.x: xóa NGAY khi xanh + cooldown 10p chống flap + idempotent qua file `owner_ping_id.txt`. Nếu vẫn spam → xem log `🧹 Đã xóa` / `⏸️ Bỏ qua ping` |
+| `⚠️ Xóa ping fail HTTP ...` lặp | Webhook không có quyền xóa / mid sai | GIỮ id retry, không post trùng (kênh vẫn 1 tin). Báo chủ kiểm tra webhook |
+| `🔐 Vẫn bị login wall` lặp rồi panic | **Đã xóa ở v4.0+.** Còn là do ai thêm lại check login | Xóa mọi `if 'login' in html`. Trang không cần login |
+| Click Turnstile lệch / không ăn | Xvfb screen ≠ `VIEWPORT` code | Đặt cả hai = 1920x1080 |
+| `libasound2 has no installation candidate` | Ubuntu 26.04 đổi tên package | Workflow dùng `libasound2t64` (đã đúng) |
+| `libgdk-pixbuf2.0-0 has no candidate` | Package obsolete trên 26.04 | Workflow dùng `libgdk-pixbuf-xlib-2.0-0` (đã đúng) |
 | `Permission denied` (403 push) | Token mặc định chỉ đọc | `permissions: contents: write` + checkout bằng `secrets.PAT` |
 | `rejected (fetch first)` | Remote có commit mới khi job chạy | `git push --force-with-lease` (state chỉ là cache) |
 | Relay đứt (job kill trước trigger) | Vượt 360 phút hoặc crash | Bấm **Run workflow** thủ công khởi động lại chuỗi |
 | Log không hiện (buffer) | Python đệm stdout qua pipe | `python -u` + `PYTHONUNBUFFERED=1` |
 | Footer lệch phút / 12h | Dùng time.is, cache không đồng bộ | pytz + lấy 1 mốc giờ sau khi push (đã fix) |
-| Spam embed mới mỗi lần chạy | `message_id.txt` chưa commit | Sửa 403 push để bước Commit State chạy |
+| Embed hiện cờ "nửa vời" / ký tự lạ | Giá trị `flag` thiếu 1 codepoint | Mỗi flag = ĐỦ 2 regional-indicator (🇸🇬🇭🇰🇯🇵🇩🇪🇺🇸) — thuần mỹ quan |
+| `LeakWarning: Canvas and WebGL readback return random data` | (chỉ ở bản Camoufox cũ) cảnh báo vô hại | v5.3 dùng Chrome-CDP, không còn warning này. Nếu thấy = đang chạy nhầm bản cũ |
 
 ---
 
 ## ⚙️ Tùy chỉnh
 
-Các hằng số đầu `long_runner.py` (đa số nằm trong vùng CẤM SỬA):
+Hằng số đầu `long_runner.py` (🧊 = vùng CẤM SỬA khi xanh):
 
     TARGET_URL = "https://hanaminikata.com/tools/buydevice_ugphone"
-    DURATION_MINUTES = 345            # Thời gian mỗi job (phút)
-    WAIT_AFTER_GOTO_MS = 12000        # 🧊 CẤM giảm: chờ Xvfb + Turnstile tự verify
+    DURATION_MINUTES = 345              # Thời gian mỗi job (phút)
+    WAIT_AFTER_GOTO_S = 12              # 🧊 CẤM giảm (<7s = peek lúc CF chưa nhả)
+    UI_MARKER_TEXT = "Tạo máy UGPhone"  # 🧊 Mốc UI THẬT (chỉ sửa khi web đổi nút)
+    VIEWPORT = {'width': 1920, 'height': 1080}  # 🧊 CẤM đổi: phải khớp Xvfb
+    OWNER_PING_FAIL_THRESHOLD = 2       # Lỗi NGHIÊM TRỌNG >= p này mới ping chủ
+    OWNER_PING_COOLDOWN_S = 600         # Sau khi xóa ping, chặn post lại 10p (chống flap)
+    PING_AUTO_DELETE = 300              # Role ping (có máy) tự xóa sau (giây)
+
+    # --- goto có节流 (3 loại, mỗi loại trần riêng) ---
+    REFRESH_EVERY_MIN = 10              # 🔓 goto-thừa chống stale (MỞ: xem FAQ freshness)
+    MAX_REAL_GOTO = 40                  # 🔓 trần goto-thừa + mở job
+    GOTO_UNK_RETRY = 3                  # 🔓 retry peek sau goto-thừa khi UNK
+    GOTO_UNK_RETRY_WAIT_S = 8
+    MAX_RECOVERY_GOTO = 40              # 🔓 trần recovery ép về buydevice khi UNK
+
+    # --- máy trạng thái tự-cứu ---
+    CF_STUCK_RESTART_MIN = 4            # 🔓 kẹt CF >= p này -> mở context mới
+    CF_GRACE_MIN = 2                    # 🔓 CF thoáng qua <= p này -> giữ embed xanh
+    MAX_CF_RESTART = 3                  # 🔓 trần context mới mỗi job
+    CF_RESTART_COOLDOWN_S = 30
+    UNK_GIVEUP_MIN = 8                  # 🔓 UNK dai dẳng >= p này -> nhường job sau
+    MAX_BROWSER_REOPEN = 3              # 🔓 trần mở lại khi Chrome CHẾT THẬT
+    REOPEN_COOLDOWN_S = 60
+
+Workflow — step chạy bot (Xvfb screen phải = `VIEWPORT`):
+
+    - name: Run 345-Minute Loop
+      run: xvfb-run --server-args="-screen 0 1920x1080x24" python -u long_runner.py
+      env:
+        PYTHONUNBUFFERED: "1"
+        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        ROLE_PING_ID: ${{ secrets.ROLE_PING_ID }}
+        # CỐ Ý KHÔNG truyền OWNER_ID (xem mục Secrets)
+
+---
+
+## ❓ FAQ
+
+**❓ Sao không dùng VPS? / VPS có tốt hơn không?**
+→ **VPS đã được loại** (chủ repo xác nhận "VPS = died"). GitHub Actions là đường
+chính. v5.3 chứng minh GitHub sống được: Chrome-CDP vượt CF ~7s, peek-only xanh
+liền mạch, và idle-redirect (đá về Dashboard) đã có recovery tự cure. Giới hạn
+của GitHub (anti-console kick) được xử lý bằng recovery + nhường job sau lấy IP
+mới, không cần VPS.
+
+**❓ UNK là gì, có phải bị chặn đăng nhập không?**
+→ **KHÔNG.** Ảnh debug thật cho     WAIT_AFTER_GOTO_MS = 12000        # 🧊 CẤM giảm: chờ Xvfb + Turnstile tự verify
     WAIT_UI_TIMEOUT_MS = 15000        # 🧊 CẤM giảm: tối đa đợi UI thật
     UI_MARKER_TEXT = "Tạo máy UGPhone"  # Mốc nhận diện UI THẬT
     VIEWPORT = {'width': 1920, 'height': 1080}  # 🧊 CẤM đổi: phải khớp Xvfb
@@ -336,6 +494,7 @@ không cần login). Code vẫn đọc nếu có nhưng anh không cần tạo/q
 ## 💖 Credit
 
 - **Camoufox** — Stealth Firefox engine (headful, humanize)
+- **DrissionPage** — Vận hành trình duyệt website ổn định nhất
 - **Xvfb** — Display ảo để headful chạy trên GitHub Actions
 - **BeautifulSoup4** — Parse HTML
 - **pytz** — Đồng bộ giờ Việt Nam chính xác
