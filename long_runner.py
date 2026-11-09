@@ -4,6 +4,7 @@ import time
 import re
 import requests
 import threading
+import subprocess
 from datetime import datetime
 import pytz
 from DrissionPage import ChromiumPage, ChromiumOptions
@@ -21,11 +22,16 @@ OWNER_PING_COOLDOWN_S = 600
 
 DURATION_MINUTES = 345
 PING_AUTO_DELETE = 300
-WAIT_AFTER_GOTO_S = 12             # giây (DrissionPage page.wait() dùng GIÂY)
+WAIT_AFTER_GOTO_S = 12
 UI_MARKER_TEXT = "Tạo máy UGPhone"
 
-REFRESH_EVERY_MIN = 10             # goto-thừa chống stale (đang bị nghi là nguồn UNK, chờ anh quyết)
+REFRESH_EVERY_MIN = 10             # goto-thừa chống stale (CHƯA bỏ: chờ anh trả lời freshness)
 MAX_REAL_GOTO = 40
+GOTO_UNK_RETRY = 3                 # UNK ngay sau goto-thừa -> retry peek chờ hydrate
+GOTO_UNK_RETRY_WAIT_S = 8
+
+# 🆕 v5.3: recovery UNK = ép về buydevice (cure redirect Dashboard do anti-console/idle)
+MAX_RECOVERY_GOTO = 40
 
 CF_STUCK_RESTART_MIN = 4
 CF_GRACE_MIN = 2
@@ -44,13 +50,13 @@ PREV_STATE_FILE = os.path.join(DATA_DIR, "prev_state.json")
 OWNER_PING_ID_FILE = os.path.join(DATA_DIR, "owner_ping_id.txt")
 DEBUG_SHOT = os.path.join(DEBUG_DIR, "last_error.png")
 
-# MỖI flag = 2 ký tự regional-indicator. ĐỪNG để cụt 1 ký tự.
+# MỖI flag = 2 ký tự regional-indicator (U+1F1E6..U+1F1FF). ĐỪNG để cụt.
 REGIONS = {
-    'SG': {'name': 'Singapore', 'flag': '🇸🇬'},  # U+1F1F8 U+1F1EC
-    'HK': {'name': 'Hong Kong',  'flag': '🇭🇰'},  # U+1F1ED U+1F1F0
-    'JP': {'name': 'Japan',       'flag': '🇯🇵'},  # U+1F1EF U+1F1F5
-    'DE': {'name': 'Germany',     'flag': '🇩🇪'},  # U+1F1E9 U+1F1EA
-    'US': {'name': 'America',     'flag': '🇺🇸'},  # U+1F1FA U+1F1F8
+    'SG': {'name': 'Singapore', 'flag': '🇸🇬'},
+    'HK': {'name': 'Hong Kong',  'flag': '🇭🇰'},
+    'JP': {'name': 'Japan',       'flag': '🇯🇵'},
+    'DE': {'name': 'Germany',     'flag': '🇩🇪'},
+    'US': {'name': 'America',     'flag': '🇺🇸'},
 }
 
 tz_vn = pytz.timezone('Asia/Ho_Chi_Minh')
@@ -63,7 +69,31 @@ def ensure_dirs():
             os.makedirs(d)
 
 # =====================================================================
-# PHÂN LOẠI (CHỈ DOM live / page.html; TUYỆT ĐỐI không login/token)
+# push ảnh debug NGAY khi chụp (throttle 60s) - giữ từ v5.2
+# =====================================================================
+_last_debug_push_ts = [0.0]
+def push_debug_shot():
+    now = time.time()
+    if now - _last_debug_push_ts[0] < 60:
+        return
+    try:
+        subprocess.run(["git", "add", "data/debug/last_error.png"], check=False, timeout=30)
+        r = subprocess.run(["git", "diff", "--cached", "--quiet"], check=False)
+        _last_debug_push_ts[0] = now
+        if r.returncode == 0:
+            return
+        subprocess.run(["git", "commit", "-m", "debug: last_error.png [skip ci]"], check=False, timeout=30)
+        subprocess.run(["git", "push"], check=False, timeout=60)
+        print("📤 Đã push ảnh debug lên repo (soi ngay được)")
+    except Exception as e:
+        print(f"⚠️ push debug lỗi (bỏ qua, còn commit cuối job): {e}")
+
+def snap_and_push(browser):
+    browser.screenshot_debug()
+    push_debug_shot()
+
+# =====================================================================
+# PHÂN LOẠI (CHỈ DOM live; không login/token)
 # =====================================================================
 def has_real_ui(html):
     return bool(html) and (UI_MARKER_TEXT.lower() in html.lower())
@@ -105,8 +135,8 @@ def error_summary_reason(mode, via):
                 "Cloudflare đang yêu cầu xác minh con người và chưa nhả.")
     if mode == 'UNK':
         return ("Không cập nhật được trạng thái máy",
-                "Trang trả về nội dung lạ, bot chưa nhận diện được "
-                "(KHÔNG phải tường đăng nhập).")
+                "Trang bị đá về Dashboard gốc (anti-console/idle redirect), bot đã thử "
+                "ép về buydevice nhưng chưa về được.")
     if via == 'incomplete':
         return ("Thiếu dữ liệu một vài khu vực",
                 "Bot đọc được ô chọn nhưng thiếu chấm màu của một/vài khu vực.")
@@ -117,7 +147,7 @@ def error_summary_reason(mode, via):
             f"Bot chưa xác định được nguyên nhân (mode={mode}, via={via}).")
 
 # =====================================================================
-# PARSE (chạy trên string page.html, KHÔNG cần JS)
+# PARSE
 # =====================================================================
 def _stock_of_text(t):
     low = t.lower()
@@ -155,7 +185,7 @@ def regions_complete(regions):
     return regions is not None and all(v is not None for v in regions.values())
 
 # =====================================================================
-# BROWSER WRAPPER (DrissionPage / Chrome-CDP) - CHỈ dùng API đã test chắc
+# BROWSER WRAPPER (DrissionPage / Chrome-CDP)
 # =====================================================================
 class ChromeCDPBrowser:
     def __init__(self):
@@ -182,6 +212,12 @@ class ChromeCDPBrowser:
         except Exception as e:
             print(f"⚠️ peek_html lỗi (coi như mềm): {e}")
             return ""
+
+    def wait(self, seconds):
+        try:
+            self.page.wait(seconds)
+        except Exception:
+            time.sleep(seconds)
 
     def parse_data(self):
         html = self.peek_html()
@@ -243,6 +279,32 @@ def open_browser():
     except Exception as e:
         print(f"❌ Mở browser lỗi: {e}")
         return None
+
+# =====================================================================
+# 🆕 v5.3: RECOVERY UNK -> ép về buydevice (cure redirect Dashboard)
+#   Trả (cured, regions, via). Cure = GREEN + parse đủ 5 region.
+#   Chỉ 1 lần/episode (unk_recovery_done), có quota riêng.
+# =====================================================================
+def try_recover(browser, counters):
+    if counters['unk_recovery_done'] or counters['recovery_goto_used'] >= MAX_RECOVERY_GOTO:
+        return False, None, None
+    counters['unk_recovery_done'] = True
+    counters['recovery_goto_used'] += 1
+    print(f"↩️ UNK (bị đá về Dashboard) -> recovery goto ép về buydevice "
+          f"(lần {counters['recovery_goto_used']}/{MAX_RECOVERY_GOTO})...")
+    ok = browser.real_goto(TARGET_URL)
+    if not ok:
+        print("↩️ Recovery goto lỗi -> không cure được, chuyển UNK dai dẳng.")
+        return False, None, None
+    peek = browser.peek_html()
+    if classify(peek) == 'GREEN':
+        regions, via = browser.parse_data()
+        if regions is not None:
+            print("↩️ Recovery THÀNH CÔNG -> GREEN. Bot tự fix redirect, KHÔNG ping chủ.")
+            return True, regions, via
+    print("↩️ Recovery goto VẪN không GREEN -> không phải redirect lạc trang "
+          "(hoặc anti-console kick cả goto), chuyển UNK dai dẳng.")
+    return False, None, None
 
 # =====================================================================
 # DISCORD & STATE
@@ -375,10 +437,11 @@ def check_and_ping(regions, prev_state):
 # MAIN LOOP
 # =====================================================================
 def main():
-    print("🏁 v5.1 starting (DrissionPage Chrome-CDP, peek-only + FIX UNK chụp ảnh)")
+    print("🏁 v5.3 starting (UNK recovery: ép về buydevice khi bị đá về Dashboard)")
     ensure_dirs()
     msg_id, prev_state, owner_ping_id = load_state()
-    state = {'owner_ping_msg_id': owner_ping_id, 'last_cleared_ts': None}
+    state = {'owner_ping_msg_id': owner_ping_id, 'last_cleared_ts': None,
+             'recovery_goto_used': 0, 'unk_recovery_done': False}
     last_regions = prev_state if prev_state else {c: False for c in REGIONS}
 
     browser = open_browser()
@@ -398,11 +461,17 @@ def main():
         mode = classify(browser.peek_html())
         cf_min = 1 if mode == 'CF' else 0
     if mode == 'SRV':
-        browser.screenshot_debug()
+        snap_and_push(browser)
         print("🟠 Mở job đã thấy server Hanami 520/5xx -> CHỜ thụ động (log thôi, không ping).")
     if mode == 'UNK':
-        browser.screenshot_debug()   # 🆕 v5.1: mở job đã UNK cũng phải có ảnh
-        print("❓ Mở job đã UNK -> chụp debug để soi trang lạ.")
+        # mở job đã bị đá về Dashboard -> recovery ngay
+        cured, rc, vc = try_recover(browser, state)
+        if cured:
+            mode = 'GREEN'; unk_min = 0
+            print("↩️ Mở job recovery -> GREEN.")
+        else:
+            snap_and_push(browser)
+            print("❓ Mở job đã UNK (Dashboard) và recovery fail -> chờ, quá 8p dừng êm.")
     print(f"🧭 Mode khởi đầu: {mode} (goto đã dùng {real_goto_used}/{MAX_REAL_GOTO})")
 
     cf_restart_used = 0
@@ -450,7 +519,11 @@ def main():
                 if mode == 'CF':
                     browser.click_turnstile(); cf_clicked = True
                 if mode == 'UNK':
-                    browser.screenshot_debug()   # 🆕 v5.1
+                    cured, rc, vc = try_recover(browser, state)
+                    if cured:
+                        mode = 'GREEN'; unk_min = 0
+                    else:
+                        snap_and_push(browser)
 
             regions = None
             via = "NONE"
@@ -463,27 +536,47 @@ def main():
                         print(f"🔁 [{hhmm}] goto re-hydrate thưa lần {real_goto_used+1}/{MAX_REAL_GOTO} (chống stale)")
                         browser.real_goto(TARGET_URL)
                         real_goto_used += 1; mins_since_goto = 0
-                    peek = browser.peek_html()
-                    nm = classify(peek)
+                        peek = browser.peek_html()
+                        nm = classify(peek)
+                        if nm == 'UNK':
+                            for i in range(1, GOTO_UNK_RETRY + 1):
+                                print(f"♻️ [{hhmm}] UNK sau goto -> retry peek {i}/{GOTO_UNK_RETRY} (chờ hydrate {GOTO_UNK_RETRY_WAIT_S}s)...")
+                                browser.wait(GOTO_UNK_RETRY_WAIT_S)
+                                peek = browser.peek_html()
+                                nm = classify(peek)
+                                if nm != 'UNK':
+                                    print(f"✅ [{hhmm}] Retry {i} -> {nm} (hydrate chậm, cứu được).")
+                                    break
+                            if nm == 'UNK':
+                                print(f"⚠️ [{hhmm}] UNK sau goto VẪN UNK sau retry -> không phải hydrate chậm.")
+                    else:
+                        peek = browser.peek_html()
+                        nm = classify(peek)
                     if nm == 'GREEN':
                         regions, via = browser.parse_data()
                         if regions is None:
                             summary, reason = error_summary_reason('GREEN', via)
-                            browser.screenshot_debug()
+                            snap_and_push(browser)
                             print(f"⚠️ [{hhmm}] GREEN nhưng parse thiếu ({via}) -> critical, giữ browser.")
                     elif nm == 'SRV':
                         mode, srv_min, cf_min, unk_min, cf_clicked = 'SRV', 1, 0, 0, False
-                        browser.screenshot_debug()
+                        snap_and_push(browser)
                         print(f"🟠 [{hhmm}] Server Hanami 520/5xx -> CHỜ thụ động.")
                     elif nm == 'CF':
                         mode, cf_min, srv_min, unk_min, cf_clicked = 'CF', 1, 0, 0, False
-                        browser.screenshot_debug()
+                        snap_and_push(browser)
                         print(f"🟡 [{hhmm}] Rơi vào CF verify -> click best-effort rồi chờ tự nhả.")
                         browser.click_turnstile(); cf_clicked = True
                     else:
-                        mode, unk_min, srv_min, cf_min, cf_clicked = 'UNK', 1, 0, 0, False
-                        browser.screenshot_debug()   # 🆕 v5.1: GREEN->UNK lần đầu PHẢI chụp
-                        print(f"❓ [{hhmm}] peek trả trang không rõ mặt -> chờ, quá {UNK_GIVEUP_MIN}p dừng êm.")
+                        # 🆕 v5.3: UNK khi đang GREEN (idle redirect về Dashboard) -> recovery
+                        cured, rc, vc = try_recover(browser, state)
+                        if cured:
+                            regions, via = rc, vc
+                            print(f"↩️ [{hhmm}] Recovery cure idle-redirect -> GREEN (không ping).")
+                        else:
+                            mode, unk_min, srv_min, cf_min, cf_clicked = 'UNK', 1, 0, 0, False
+                            snap_and_push(browser)
+                            print(f"❓ [{hhmm}] peek trả Dashboard (UNK) + recovery fail -> chờ, quá {UNK_GIVEUP_MIN}p dừng êm.")
                 else:
                     peek = browser.peek_html()
                     nm = classify(peek)
@@ -493,14 +586,14 @@ def main():
                         regions, via = browser.parse_data()
                         if regions is None:
                             summary, reason = error_summary_reason('GREEN', via)
-                            browser.screenshot_debug()
+                            snap_and_push(browser)
                     elif nm == 'SRV':
                         mode, srv_min, cf_min, unk_min = 'SRV', srv_min + 1, 0, 0
-                        if srv_min == 1: browser.screenshot_debug()
+                        if srv_min == 1: snap_and_push(browser)
                         print(f"🟠 [{hhmm}] Server Hanami 520/5xx (phút thứ {srv_min}) -> chờ thụ động, KHÔNG reload.")
                     elif nm == 'CF':
                         mode, cf_min, srv_min, unk_min = 'CF', cf_min + 1, 0, 0
-                        if cf_min == 1: browser.screenshot_debug()
+                        if cf_min == 1: snap_and_push(browser)
                         if not cf_clicked:
                             browser.click_turnstile(); cf_clicked = True
                         if cf_min >= CF_STUCK_RESTART_MIN:
@@ -529,21 +622,42 @@ def main():
                             if mode == 'CF':
                                 browser.click_turnstile(); cf_clicked = True
                             if mode == 'UNK':
-                                browser.screenshot_debug()   # 🆕 v5.1
+                                cured, rc, vc = try_recover(browser, state)
+                                if cured:
+                                    mode = 'GREEN'; unk_min = 0
+                                else:
+                                    snap_and_push(browser)
                         else:
                             print(f"⏳ [{hhmm}] Kẹt CF {cf_min}/{CF_STUCK_RESTART_MIN}p (đã click, chờ tự nhả) -> KHÔNG reload.")
                     else:
-                        mode, unk_min, srv_min, cf_min = 'UNK', unk_min + 1, 0, 0
-                        if unk_min == 1: browser.screenshot_debug()   # 🆕 v5.1: vừa chuyển vào UNK (từ SRV/CF) chụp lần đầu
-                        if unk_min >= UNK_GIVEUP_MIN:
-                            exit_reason = 'unk'
-                            print(f"🛑 [{hhmm}] Trang không rõ mặt {unk_min}p -> bó tay, ping rồi dừng êm.")
-                            post_owner_ping_once(state)
-                            break
-                        print(f"❓ [{hhmm}] Trang không rõ mặt {unk_min}/{UNK_GIVEUP_MIN}p -> chờ thụ động.")
+                        # 🆕 v5.3: UNK từ mode SRV/CF/UNK. Lần đầu (unk_min sẽ =1) -> recovery 1 lần.
+                        new_unk = unk_min + 1
+                        if new_unk == 1:
+                            cured, rc, vc = try_recover(browser, state)
+                            if cured:
+                                mode = 'GREEN'; cf_min = srv_min = unk_min = 0; cf_clicked = False; mins_since_goto = 0
+                                regions, via = rc, vc
+                                print(f"↩️ [{hhmm}] Recovery cure (từ mode cũ) -> GREEN (không ping).")
+                            else:
+                                mode, unk_min, srv_min, cf_min = 'UNK', new_unk, 0, 0
+                                snap_and_push(browser)
+                                if unk_min >= UNK_GIVEUP_MIN:
+                                    exit_reason = 'unk'
+                                    print(f"🛑 [{hhmm}] Trang không rõ mặt {unk_min}p -> bó tay, ping rồi dừng êm.")
+                                    post_owner_ping_once(state)
+                                    break
+                                print(f"❓ [{hhmm}] UNK (Dashboard) recovery fail {unk_min}/{UNK_GIVEUP_MIN}p -> chờ thụ động.")
+                        else:
+                            mode, unk_min, srv_min, cf_min = 'UNK', new_unk, 0, 0
+                            if unk_min >= UNK_GIVEUP_MIN:
+                                exit_reason = 'unk'
+                                print(f"🛑 [{hhmm}] Trang không rõ mặt {unk_min}p -> bó tay, ping rồi dừng êm.")
+                                post_owner_ping_once(state)
+                                break
+                            print(f"❓ [{hhmm}] UNK dai dẳng {unk_min}/{UNK_GIVEUP_MIN}p (đã recovery episode này) -> chờ thụ động.")
             except Exception as e:
                 print(f"⚠️ [{hhmm}] Lỗi mềm ngoài dự kiến: {e} -> chụp debug, giữ browser/mode.")
-                try: browser.screenshot_debug()
+                try: snap_and_push(browser)
                 except Exception: pass
 
             # ===== KẾT QUẢ =====
@@ -553,6 +667,7 @@ def main():
                 last_regions = regions
                 fail_streak = 0
                 critical_fail_streak = 0
+                state['unk_recovery_done'] = False   # 🆕 v5.3: GREEN -> mở lại recovery cho episode kế
                 ket_qua = ", ".join(f"{c}: {bool(regions.get(c))}" for c in ['SG','HK','JP','DE','US'])
                 print(f"✅ Check [{hhmm}] ({via}): {ket_qua}")
                 msg_id = push_embed(last_regions, msg_id)
@@ -579,7 +694,7 @@ def main():
                     msg_id = push_embed_error(summary, reason, fail_streak, msg_id)
 
             save_state(msg_id, last_regions, state['owner_ping_msg_id'])
-            print(f"🕐 Footer: {vn_now.strftime('%H:%M:%S')} (mode={mode} | reopen:{reopen_count} | cf-ctx:{cf_restart_used} | goto:{real_goto_used}/{MAX_REAL_GOTO} | since_goto:{mins_since_goto} | ping:{'có' if state['owner_ping_msg_id'] else 'không'})")
+            print(f"🕐 Footer: {vn_now.strftime('%H:%M:%S')} (mode={mode} | reopen:{reopen_count} | cf-ctx:{cf_restart_used} | goto:{real_goto_used}/{MAX_REAL_GOTO} | recovery:{state['recovery_goto_used']}/{MAX_RECOVERY_GOTO} | since_goto:{mins_since_goto} | ping:{'có' if state['owner_ping_msg_id'] else 'không'})")
 
             if exit_reason:
                 break
@@ -591,7 +706,7 @@ def main():
         if browser:
             try: browser.close()
             except Exception: pass
-        print(f"⏰ Kết thúc job. reason={exit_reason or 'hết 345p'} (reopen:{reopen_count} cf-ctx:{cf_restart_used} goto:{real_goto_used})")
+        print(f"⏰ Kết thúc job. reason={exit_reason or 'hết 345p'} (reopen:{reopen_count} cf-ctx:{cf_restart_used} goto:{real_goto_used} recovery:{state['recovery_goto_used']})")
 
 if __name__ == "__main__":
     main()
