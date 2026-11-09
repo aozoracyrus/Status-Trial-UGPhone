@@ -1,4 +1,4 @@
-<div align="center>
+<div align="center">
 
 # 📱 STATUS TRIAL UGPHONE — DISCORD BOT
 
@@ -17,13 +17,13 @@
 ## 📖 Mục lục
 
 - [Giới thiệu](#-giới-thiệu)
-- [Yêu cầu](#️-yêu-cầu)
+- [Yêu cầu](#-yêu-cầu)
 - [Secrets & quyền](#-secrets--quyền)
 - [Cách hoạt động v5.3](#-cách-hoạt-động-v53)
 - [Chính sách đóng băng](#-chính-sách-đóng-băng)
 - [Cấu trúc](#-cấu-trúc)
-- [Lỗi thường gặp](#️-lỗi-thường-gặp)
-- [Tùy chỉnh](#️-tùy-chỉnh)
+- [Lỗi thường gặp](#-lỗi-thường-gặp)
+- [Tùy chỉnh](#-tùy-chỉnh)
 - [FAQ](#-faq)
 - [Changelog](#-changelog)
 - [Credit](#-credit)
@@ -275,7 +275,7 @@ Vì nó báo tình trạng lỗi, không phải sự kiện. Nó phải treo su�
 
 ---
 
-<div align="center>
+<div align="center">
 
 *Made with ❤️ by Aozorians • v5.3: hỏng thật hãy sửa, xanh thì để yên • Mọi dòng quan trọng đều có log/ảnh làm chứng, không hứa suông.*
 
